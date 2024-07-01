@@ -1,0 +1,298 @@
+from optuna.samplers import CmaEsSampler
+from sklearn.model_selection import StratifiedKFold
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+import optuna
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+import os
+from joblib import dump
+from sklearn.model_selection import KFold
+from keras import regularizers
+from keras.layers import BatchNormalization
+from keras.callbacks import TensorBoard
+import datetime
+import atexit
+from optuna.samplers import TPESampler, IntersectionSearchSpace
+
+
+if __name__ == '__main__':
+# Load the data
+    data1 = pd.read_excel("C:/pred/5/9/f1_p11.xlsx", header=None)
+    data2 = pd.read_excel("C:/pred/5/9/f2_p11.xlsx", header=None)
+    X2_base = data2.iloc[:, 2:62].values
+    y2_true_base = data2.iloc[:, 62].values
+    results_df = pd.DataFrame()
+    # Extracting features and labels
+    X = data1.iloc[:, 2:62].values
+    y_tb = data1.iloc[:, 62].values
+
+
+    # Scaling the features
+    sc = StandardScaler()
+    X = sc.fit_transform(X)
+
+
+    # Base path for saving models
+    save_base_path = "C:/pred/5/9/p11/"
+
+
+
+
+   
+    def custom_metric(y_true, y_pred):
+        y_pred_bin = tf.cast(tf.greater(y_pred, 0.5), tf.float32)
+       
+        CORRECT = tf.reduce_sum(tf.cast(tf.equal(y_pred_bin, 1) & tf.equal(y_true, 1), tf.float32))
+        INCORRECT = tf.reduce_sum(tf.cast(tf.equal(y_pred_bin, 1) & tf.equal(y_true, 0), tf.float32))
+        ALL_CORRECT = tf.reduce_sum(y_true)
+        ALL_INCORRECT = tf.reduce_sum(1 - y_true)
+        SUM_ALL = tf.cast(tf.size(y_true), dtype=tf.float32)
+
+
+        # Вычисляем метрику
+        numerator = (CORRECT - INCORRECT) * (CORRECT/ALL_CORRECT + (ALL_INCORRECT - INCORRECT)/ALL_INCORRECT)
+        metric_value = numerator / (SUM_ALL + 1e-7)  # Добавляем небольшое значение для стабильности
+
+
+        # Если метрика становится нечисловой, возвращаем 0
+        return tf.where(tf.math.is_finite(metric_value), metric_value, 0.0)
+
+
+    class CombinedSampler(optuna.samplers.BaseSampler):
+        def __init__(self):
+            self._tpe_sampler = TPESampler()
+            self._cma_sampler = CmaEsSampler()
+            self._search_space = IntersectionSearchSpace()
+
+
+        def infer_relative_search_space(self, study, trial):
+            return self._search_space.calculate(study, ordered_dict=True)
+
+
+        def sample_relative(self, study, trial, search_space):
+            categorical_params = {name: param for name, param in search_space.items() if isinstance(param, optuna.distributions.CategoricalDistribution)}
+            numeric_params = {name: param for name, param in search_space.items() if not isinstance(param, optuna.distributions.CategoricalDistribution)}
+
+
+            # Sample using TPESampler for categorical parameters
+            tpe_samples = self._tpe_sampler.sample_relative(study, trial, categorical_params)
+           
+            # Sample using CmaEsSampler for numerical parameters
+            cma_samples = self._cma_sampler.sample_relative(study, trial, numeric_params)
+
+
+            # Combine samples
+            return {**tpe_samples, **cma_samples}
+        def sample_independent(self, study, trial, param_name, param_distribution):
+            if isinstance(param_distribution, optuna.distributions.CategoricalDistribution):
+                return self._tpe_sampler.sample_independent(study, trial, param_name, param_distribution)
+            else:
+                return self._cma_sampler.sample_independent(study, trial, param_name, param_distribution)
+
+
+
+
+
+
+
+
+
+
+    def create_model(dense1, dense2, dropout1, dropout2,
+                    activation1, activation2, activation3,
+                    optimizer, loss, reg_type='none', l1_rate=0.0, l2_rate=0.0,
+                    use_batch_norm=False, num_hidden_layers=2,weight_initializer='he_normal', use_bias=True, bias_initializer='zeros', kernel_constraint='max_norm',bias_constraint='max_norm'):
+        model = tf.keras.models.Sequential()
+       
+        if reg_type == 'l1':
+            regularizer = regularizers.l1(l1_rate)
+        elif reg_type == 'l2':
+            regularizer = regularizers.l2(l2_rate)
+        elif reg_type == 'l1_l2':
+            regularizer = regularizers.l1_l2(l1=l1_rate, l2=l2_rate)
+        else:
+            regularizer = None
+
+
+        model.add(tf.keras.layers.Dense(units=dense1, activation=activation1, kernel_regularizer=regularizer, kernel_initializer=weight_initializer, bias_initializer=bias_initializer, use_bias=use_bias,kernel_constraint=kernel_constraint,bias_constraint=bias_constraint, input_shape=(60,)))
+        if use_batch_norm:
+            model.add(BatchNormalization())
+        model.add(tf.keras.layers.Dropout(dropout1))
+       
+        for _ in range(num_hidden_layers):
+            model.add(tf.keras.layers.Dense(units=dense2, activation=activation2, kernel_regularizer=regularizer,kernel_initializer=weight_initializer, bias_initializer=bias_initializer, use_bias=use_bias,kernel_constraint=kernel_constraint,bias_constraint=bias_constraint))
+           
+            if use_batch_norm:
+                model.add(BatchNormalization())
+            model.add(tf.keras.layers.Dropout(dropout2))
+           
+        model.add(tf.keras.layers.Dense(1, activation=activation3))
+        model.compile(optimizer=optimizer, loss=loss, metrics=[custom_metric])
+        return model
+
+
+
+
+    all_possible_parameters = [
+        'metric',
+        'relu_1', 'tanh_1', 'sigmoid_1', 'softmax_1', 'softplus_1', 'softsign_1', 'selu_1', 'elu_1', 'exponential_1', 'linear_1',
+        'relu_2', 'tanh_2', 'sigmoid_2', 'softmax_2', 'softplus_2', 'softsign_2', 'selu_2', 'elu_2', 'exponential_2', 'linear_2',
+        'Adam', 'RMSprop', 'SGD', 'Adagrad', 'Adadelta', 'Adamax', 'Nadam',
+        'binary_crossentropy', 'mean_squared_error', 'hinge', 'logcosh', 'poisson', 'kullback_leibler_divergence',
+        'l1', 'l2', 'l1_l2', 'none'
+    ]
+    results_df = pd.DataFrame(columns=all_possible_parameters)
+
+
+
+
+
+
+
+
+
+
+    def objective(trial):
+        global results_df
+        global best_global_difference
+        global best_global_model
+        # Initialize with a very low value
+        dense1 = trial.suggest_int('dense1', 2, 128)
+        dense2 = trial.suggest_int('dense2', 2, 128)
+        dropout1 = trial.suggest_float('dropout1', 0.0, 0.99, step=0.01)
+        dropout2 = trial.suggest_float('dropout2', 0.0, 0.99, step=0.01)
+        activation1 = trial.suggest_categorical('activation1', ['relu', 'tanh', 'sigmoid', 'softmax', 'softplus', 'softsign', 'selu', 'elu', 'exponential', 'linear'])
+        activation2 = trial.suggest_categorical('activation2', ['relu', 'tanh', 'sigmoid', 'softmax', 'softplus', 'softsign', 'selu', 'elu', 'exponential', 'linear'])
+        weight_initializer = trial.suggest_categorical('weight_initializer', ['he_normal', 'he_uniform', 'glorot_normal', 'glorot_uniform', 'random_normal', 'random_uniform'])
+        optimizer = trial.suggest_categorical('optimizer', ['Adam', 'RMSprop', 'SGD', 'Adagrad', 'Adadelta', 'Adamax', 'Nadam'])
+        loss = trial.suggest_categorical('loss', ['binary_crossentropy', 'mean_squared_error', 'hinge', 'logcosh', 'poisson', 'kullback_leibler_divergence'])
+        #loss = trial.suggest_categorical('loss', ['mean_squared_error', 'hinge', 'logcosh', 'poisson'])
+        batch_size = trial.suggest_categorical('batch_size', [1,2,3,16])
+        epochs = trial.suggest_int('epochs', 200, 1500)
+        reg_type = trial.suggest_categorical('reg_type', ['l1', 'l2', 'l1_l2', 'none'])
+        #reg_type = trial.suggest_categorical('reg_type', ['l1'])
+        l1_rate = trial.suggest_float('l1_rate', 1e-6, 1e-2, log=True) if reg_type in ['l1', 'l1_l2'] else 0.0
+        l2_rate = trial.suggest_float('l2_rate', 1e-6, 1e-2, log=True) if reg_type in ['l2', 'l1_l2'] else 0.0
+        use_batch_norm = trial.suggest_categorical('use_batch_norm', [True, False])
+        num_hidden_layers = trial.suggest_int('num_hidden_layers', 1, 5)
+        initial_lr = trial.suggest_float('initial_lr', 1e-5, 0.5, log=True)
+        drop_factor = trial.suggest_float('drop_factor', 0.2, 0.9)
+        epochs_drop = trial.suggest_int('epochs_drop', 5, 30)
+        #log_subdir = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        #log_dir = f"C:/pred/5/p1/logs/{log_subdir}/"
+        #os.makedirs(log_dir, exist_ok=True)
+        #tensorboard_callback = TensorBoard(log_dir=log_dir, histogram_freq=1)
+        n_splits = trial.suggest_int('n_splits', 2, 5)
+        kf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=None)
+        use_bias = trial.suggest_categorical('use_bias', [True, False])
+        bias_initializer = trial.suggest_categorical('bias_initializer', ['zeros', 'ones', 'random_normal', 'random_uniform'])
+        kernel_constraint = trial.suggest_categorical('kernel_constraint', ['max_norm', 'min_max_norm', 'non_neg', 'unit_norm'])
+        bias_constraint = trial.suggest_categorical('bias_constraint', ['max_norm', 'min_max_norm', 'non_neg', 'unit_norm'])
+
+
+
+
+
+
+        def step_decay(epoch, lr):
+            return initial_lr * (drop_factor ** np.floor((1 + epoch) / epochs_drop))
+
+
+        lr_scheduler = tf.keras.callbacks.LearningRateScheduler(step_decay)
+        early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_custom_metric', patience=5, restore_best_weights=True, mode='max')
+        model_counter = 0
+        max_metric = -np.inf
+        for train_index, test_index in kf.split(X, y_tb):
+            X_train, X_test = X[train_index], X[test_index]
+            y_train, y_test = y_tb[train_index], y_tb[test_index]
+           
+            # Creating model with specific hyperparameters
+            model = create_model(dense1, dense2, dropout1, dropout2, activation1, activation2, 'sigmoid', optimizer, loss, reg_type, l1_rate, l2_rate, weight_initializer=weight_initializer)
+            # Training model
+            model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=1, validation_split=0.1, callbacks=[lr_scheduler, early_stopping])
+           
+            # Testing model on data from 2.xlsx
+            X2 = sc.transform(X2_base)
+            y2_true = y2_true_base
+            y2_pred = model.predict(X2)
+            y2_pred = (y2_pred > 0.5).astype(int).flatten()
+
+
+            # Calculating accuracy metrics
+            CORRECT = np.sum((y2_pred == 1) & (data2.iloc[:, 62].values == 1))
+            INCORRECT = np.sum((y2_pred == 1) & (data2.iloc[:, 62].values == 0))
+            ALL_CORRECT = np.sum(data2.iloc[:, 62].values == 1)
+            ALL_INCORRECT = np.sum(data2.iloc[:, 62].values == 0)
+            SUM_ALL = ALL_CORRECT + ALL_INCORRECT
+
+
+            metric = (CORRECT - INCORRECT) / SUM_ALL * (CORRECT/ALL_CORRECT + (ALL_INCORRECT - INCORRECT)/ALL_INCORRECT)
+
+
+    # Еще раз добавляем небольшое значение, чтобы предотвратить деление на ноль
+
+
+            formatted_metric = f"{metric:0.5f}".replace('.', ',')
+            model_name = f"{formatted_metric}_p1_{trial.number}_{CORRECT}_{INCORRECT}.h5"
+            model_path = os.path.join(save_base_path, model_name)
+            if metric >0.1:
+               
+                model.save(model_path)
+                dump(sc, f"{save_base_path}{formatted_metric}_p1_{trial.number}_{CORRECT}_{INCORRECT}.joblib")
+             
+            trial.report(metric, model_counter)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+
+            model_counter += 1
+            if metric > max_metric:
+                max_metric = metric
+
+
+           
+
+
+
+
+
+
+        return max_metric
+
+
+    pruner = optuna.pruners.SuccessiveHalvingPruner()
+    sampler = CombinedSampler()
+    study = optuna.create_study(direction='maximize', sampler=sampler, pruner=pruner, study_name='your_study_name', storage=f'sqlite:///{save_base_path}study.db', load_if_exists=True)
+
+
+
+
+
+
+
+
+
+
+    n_configs = 1000
+    study.optimize(objective, n_trials=n_configs, n_jobs=1)
+
+
+    # Printing the best hyperparameters
+
+
+
+
+    best_params = study.best_params
+    print("Best hyperparameters:", best_params)
+
+
+    print("Model training and optimization completed!")
+
+
+
+
+
+
+
