@@ -1,0 +1,478 @@
+import configparser
+
+import ccxt
+
+import time
+
+import os
+
+import logging
+
+from datetime import datetime
+
+import requests
+
+
+
+class ExcludeFilter(logging.Filter):
+
+    def filter(self, record):
+
+        return "Executed buy orders" not in record.getMessage()
+
+                                                                                        
+logging.basicConfig(
+
+    level=logging.INFO,
+
+    format='%(asctime)s - %(levelname)s - %(message)s',
+
+    handlers=[
+
+        logging.FileHandler("/root/Desktop/my.log",delay=False),
+
+        logging.StreamHandler()
+
+    ]
+
+)
+
+
+
+for handler in logging.getLogger().handlers:
+
+    handler.addFilter(ExcludeFilter())
+
+
+
+def read_config(file_path):
+
+    config = configparser.ConfigParser()
+
+    config.read(file_path)
+
+    pairs = {}
+
+    for section in config.sections():
+
+        try:
+
+            pair = {
+
+                "pair": config[section]["pair"],
+
+                "profit_percentage": float(config[section]["profit_percentage"]),
+
+                "profit_step": float(config[section]["profit_step"]),
+
+                "initial_amount": float(config[section]["initial_amount"]),
+
+                "order_below": float(config[section]["order_below"]),
+
+                "price_limit": float(config[section]["price_limit"]),
+
+                "order_step": float(config[section]["order_step"]),
+
+                "target_percentage": float(config[section]["target_percentage"]),
+
+                "low_percentage": float(config[section]["low_percentage"])
+
+            }
+
+            pairs[config[section]["pair"]] = pair
+
+        except Exception as e:
+
+            logging.error(f"Error in configuration for {config[section].get('pair', 'unknown pair')}: {e}")
+
+    return pairs
+
+
+
+def check_config_changes(config_path, previous_pairs):
+
+    current_pairs = read_config(config_path)
+
+    
+
+    added_pairs = {pair: data for pair, data in current_pairs.items() if pair not in previous_pairs}
+
+    removed_pairs = {pair: data for pair, data in previous_pairs.items() if pair not in current_pairs}
+
+    
+
+    return added_pairs, removed_pairs, current_pairs
+
+
+
+config_path = "/root/Desktop/my.ini"
+
+pairs_config = read_config(config_path)
+
+logging.info(pairs_config)
+
+
+
+try:
+
+    with open(r"/root/Desktop/api_keysmy.txt", 'r') as file:
+
+        api_key = file.readline().strip()
+
+        api_secret = file.readline().strip()
+
+except Exception as e:
+
+    logging.error(f"Error reading API keys: {e}")
+
+    exit(1)
+
+
+
+exchange = ccxt.bybit({
+
+    'apiKey': api_key,
+
+    'secret': api_secret,
+
+    'timeout': 30000,  # Увеличение таймаута до 30 секунд
+
+})
+
+
+
+order_tracker = {}
+
+
+
+def place_initial_orders(pairs_config):
+
+    for pair, config in pairs_config.items():
+
+        symbol = config['pair']
+
+        initial_amount = config['initial_amount']
+
+        order_below = config['order_below']
+
+        order_step = config['order_step']
+
+        
+
+        ticker = exchange.fetch_ticker(symbol)
+
+        current_price = ticker['last']
+
+        
+
+        buy_price = current_price * (1 - order_below / 100)
+
+        
+
+        if buy_price >= config['price_limit']:
+
+            logging.info(f"Skipping {symbol} as the buy price {buy_price} exceeds the limit {config['price_limit']}")
+
+            continue
+
+        
+
+        order = exchange.create_limit_buy_order(symbol, initial_amount / buy_price, buy_price)
+
+        logging.info(f"Placed initial buy order for {symbol} at {buy_price} with amount {initial_amount / buy_price}")
+
+        
+
+        order_tracker[symbol] = {
+
+            'buy_orders': [order],
+
+            'sell_threshold_price': None,
+
+            'config': config,
+
+            'total_amount': 0,
+
+            'total_cost': 0,
+
+            'target_price': None,
+
+            'low_price': None,
+
+            'previous_target_price': None,
+
+            'reached_target': False,
+
+            'average_buy_price': None
+
+        }
+
+        
+
+        place_grid_orders(symbol, config, buy_price)
+
+
+
+def calculate_target_price(point_a, point_b, target_percentage):
+
+    target_price = point_a + (target_percentage / 100) * (point_b - point_a)
+
+    logging.info(f"Calculated target price: {target_price}")
+
+    return target_price
+
+
+
+def calculate_low_price(point_a, point_b, low_percentage):
+
+    low_price = point_a + (low_percentage / 100) * (point_b - point_a)
+
+    logging.info(f"Calculated low price: {low_price}")
+
+    return low_price
+
+
+
+def place_grid_orders(symbol, config, initial_buy_price):
+
+    initial_amount = config['initial_amount']
+
+    order_step = config['order_step']
+
+    grid_orders = []
+
+    grid_size = 5
+
+    
+
+    for i in range(1, grid_size + 1):
+
+        grid_buy_price = initial_buy_price * (1 - (i * order_step / 100))
+
+        grid_amount = initial_amount * (1 + 0.2 * i) / grid_buy_price
+
+        grid_order = exchange.create_limit_buy_order(symbol, grid_amount, grid_buy_price)
+
+        grid_orders.append(grid_order)
+
+        logging.info(f"Placed grid buy order {i} for {symbol} at {grid_buy_price} with amount {grid_amount}")
+
+    
+
+    order_tracker[symbol]['buy_orders'].extend(grid_orders)
+
+
+
+def cancel_all_orders(symbol):
+
+    open_orders = exchange.fetch_open_orders(symbol)
+
+    for order in open_orders:
+
+        try:
+
+            exchange.cancel_order(order['id'], symbol)
+
+            logging.info(f"Cancelled order {order['id']} for {symbol}")
+
+        except Exception as e:
+
+            logging.error(f"Error cancelling order {order['id']} for {symbol}: {str(e)}")
+
+
+
+def fetch_closed_orders_with_retries(symbol, retries=5, delay=5):
+
+    for i in range(retries):
+
+        try:
+
+            return exchange.fetch_closed_orders(symbol)
+
+        except requests.exceptions.ReadTimeout:
+
+            logging.warning(f"Timeout error fetching closed orders for {symbol}. Retrying {i+1}/{retries}...")
+
+            time.sleep(delay)
+
+        except requests.exceptions.ConnectionError as e:
+
+            logging.warning(f"Connection error fetching closed orders for {symbol}: {str(e)}. Retrying {i+1}/{retries}...")
+
+            time.sleep(delay)
+
+        except ccxt.NetworkError as e:
+
+            logging.warning(f"Network error fetching closed orders for {symbol}: {str(e)}. Retrying {i+1}/{retries}...")
+
+            time.sleep(delay)
+
+        except ccxt.ExchangeError as e:
+
+            logging.error(f"Exchange error fetching closed orders for {symbol}: {str(e)}. Retrying {i+1}/{retries}...")
+
+            time.sleep(delay)
+
+        except Exception as e:
+
+            logging.error(f"Unexpected error fetching closed orders for {symbol}: {str(e)}. Retrying {i+1}/{retries}...")
+
+            time.sleep(delay)
+
+    raise requests.exceptions.ReadTimeout(f"Failed to fetch closed orders for {symbol} after {retries} attempts")
+
+
+
+
+def sell_with_retry(symbol, sell_amount, max_retries=20, retry_delay=10):
+    for attempt in range(max_retries):
+        try:
+            # Создание рыночного ордера на продажу
+            market_sell_order = exchange.create_market_sell_order(symbol, sell_amount)
+            order_id = market_sell_order['id']
+
+            for check_attempt in range(max_retries):
+                time.sleep(retry_delay)
+                order_status = exchange.fetch_closed_order(order_id, symbol)
+                if order_status['status'] == 'closed':
+                    logging.info(f"Market sell order for {symbol} successfully executed on attempt {attempt + 1}")
+                    return True
+                else:
+                    logging.warning(f"Market sell order for {symbol} not executed yet. Retrying {check_attempt + 1}/{max_retries}...")
+
+            logging.warning(f"Retrying market sell order for {symbol} at new price. Attempt {attempt + 1}/{max_retries}")
+        except ccxt.InsufficientFunds as e:
+            logging.error(f"Insufficient funds to execute market sell order for {symbol}. Error: {str(e)}")
+            return False
+        except ccxt.ExchangeError as e:
+            logging.error(f"Exchange error when executing market sell order for {symbol}: {str(e)}")
+        except Exception as e:
+            logging.error(f"Unexpected error when executing market sell order for {symbol}: {str(e)}")
+
+    logging.error(f"Failed to execute market sell order for {symbol} after {max_retries} attempts.")
+    return False
+
+def monitor_orders():
+    global pairs_config
+    while True:
+        for symbol in list(order_tracker.keys()):
+            data = order_tracker[symbol]
+            buy_orders = data['buy_orders']
+            config = data['config']
+            executed_orders = []
+
+            closed_orders = fetch_closed_orders_with_retries(symbol)
+
+            for order in buy_orders:
+                order_status = next((o for o in closed_orders if o['id'] == order['id']), None)
+                if order_status and order_status['status'] == 'closed':
+                    data['total_amount'] += order_status['filled']
+                    data['total_cost'] += order_status['filled'] * order_status['price']
+                    executed_orders.append(order)
+            
+            if executed_orders:
+                average_buy_price = data['total_cost'] / data['total_amount']
+                data['average_buy_price'] = average_buy_price
+                logging.info(f"{symbol} - Average buy price: {average_buy_price}")
+                
+                profit_percentage = config['profit_percentage']
+                sell_threshold_price = average_buy_price * (1 + profit_percentage / 100)
+                data['sell_threshold_price'] = sell_threshold_price
+                logging.info(f"{symbol} - Sell threshold price: {sell_threshold_price}")
+                
+                data['target_price'] = calculate_target_price(average_buy_price, sell_threshold_price, config['target_percentage'])
+                data['low_price'] = calculate_low_price(average_buy_price, data['target_price'], config['low_percentage'])
+                logging.info(f"{symbol} - Target price: {data['target_price']}")
+                logging.info(f"{symbol} - Low price: {data['low_price']}")
+                
+                data['buy_orders'] = [order for order in buy_orders if order not in executed_orders]
+
+            # Добавление ретраев для получения текущей цены
+            current_price = None
+            for attempt in range(5):  # 5 попыток
+                try:
+                    ticker = exchange.fetch_ticker(symbol)
+                    current_price = ticker['last']
+                    if current_price is not None:
+                        break
+                except (ccxt.NetworkError, ccxt.ExchangeError) as e:
+                    logging.warning(f"Error fetching ticker for {symbol}: {str(e)}. Retrying {attempt+1}/5...")
+                    time.sleep(2)  # Задержка перед повторной попыткой
+
+            if current_price is None:
+                logging.error(f"Failed to fetch current price for {symbol} after 5 attempts. Skipping this iteration.")
+                continue
+
+            if data['target_price'] is not None and current_price >= data['target_price']:
+                cancel_all_orders(symbol)
+                
+                if data['reached_target']:
+                    data['previous_target_price'] = data['target_price']
+                    new_sell_threshold_price = current_price * (1 + config['profit_step'] / 100)
+                    data['sell_threshold_price'] = new_sell_threshold_price
+                    data['target_price'] = calculate_target_price(data['previous_target_price'], new_sell_threshold_price, config['target_percentage'])
+                    data['low_price'] = calculate_low_price(data['previous_target_price'], data['target_price'], config['low_percentage'])
+                else:
+                    data['previous_target_price'] = data['target_price']
+                    new_sell_threshold_price = current_price * (1 + config['profit_step'] / 100)
+                    data['sell_threshold_price'] = new_sell_threshold_price
+                    data['target_price'] = calculate_target_price(data['average_buy_price'], new_sell_threshold_price, config['target_percentage'])
+                    data['low_price'] = calculate_low_price(data['average_buy_price'], data['target_price'], config['low_percentage'])
+                    data['reached_target'] = True
+
+                logging.info(f"{symbol} - New sell threshold price: {new_sell_threshold_price}")
+                logging.info(f"{symbol} - New target price: {data['target_price']}")
+                logging.info(f"{symbol} - New low price: {data['low_price']}")
+
+            elif data['reached_target'] and data['low_price'] is not None and current_price <= data['low_price']:
+                balance = exchange.fetch_balance()
+                available_amount = balance[symbol.split('/')[0]]['free']
+
+                try:
+                    sell_amount = min(available_amount * 0.99, data['total_amount'])
+                    
+                    min_order_size = exchange.markets[symbol]['limits']['amount']['min']
+                    if sell_amount < min_order_size:
+                        logging.error(f"Sell amount {sell_amount} is less than minimum order size {min_order_size} for {symbol}")
+                        continue
+
+                    # Использование новой функции для продажи с ретраями
+                    if sell_with_retry(symbol, sell_amount):
+                        logging.info(f"Executed market sell order for {symbol} at {current_price} with amount {sell_amount}")
+                        del order_tracker[symbol]
+                        cancel_all_orders(symbol)  # Cancel all open orders before placing new ones
+                        place_initial_orders({symbol: config})
+                    else:
+                        logging.error(f"Failed to execute market sell order for {symbol} after multiple attempts.")
+                    
+                except ccxt.InsufficientFunds as e:
+                    logging.error(f"Insufficient funds to execute market sell order for {symbol}. Error: {str(e)}")
+                    logging.error(f"Available amount: {available_amount}, Total amount in order: {data['total_amount']}")
+                except ccxt.ExchangeError as e:
+                    logging.error(f"Exchange error when executing market sell order for {symbol}: {str(e)}")
+                except Exception as e:
+                    logging.error(f"Unexpected error when executing market sell order for {symbol}: {str(e)}")
+
+        added_pairs, removed_pairs, current_pairs = check_config_changes(config_path, pairs_config)
+
+        if added_pairs:
+            logging.info(f"Added pairs: {list(added_pairs.keys())}")
+            for pair in added_pairs:
+                cancel_all_orders(pair)  # Cancel all open orders before placing new ones
+                place_initial_orders({pair: added_pairs[pair]})
+
+        if removed_pairs:
+            logging.info(f"Removed pairs: {list(removed_pairs.keys())}")
+            for pair in removed_pairs:
+                if pair in order_tracker:
+                    cancel_all_orders(pair)  # Cancel all open orders before removing pair
+                    del order_tracker[pair]
+
+        pairs_config = current_pairs
+        time.sleep(1)
+
+if pairs_config:
+    place_initial_orders(pairs_config)
+monitor_orders()
+
+
