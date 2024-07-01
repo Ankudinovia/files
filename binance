@@ -1,0 +1,663 @@
+
+import asyncio
+
+import websockets
+
+import json
+
+
+
+import ccxt.async_support as ccxt_async
+
+from datetime import datetime
+
+import time
+
+import locale
+
+
+
+# Настройки
+
+NUM_PAIRS = 550  # Количество пар для мониторинга
+
+TRADE_AMOUNT = 580  # Сумма сделки в $
+
+PROFIT_TARGET = 0.4  # Цель по прибыли в %
+
+PERCENT_DROP_THRESHOLD = -2.1  # Порог для падения цены
+
+UPDATE_INTERVAL = 1  # Интервал обновления в секундах
+
+BUY_ORDER_TIMEOUT = 100  # Время в секундах после которых ордер на покупку будет снят
+
+ANALYSIS_WINDOW = 2  # на сколько последних секунд смотрим
+
+SELL_ORDER_TIMEOUT = 90099  # Время в секундах, после которых ордер на продажу будет снят
+
+BUY_ORDER_OFFSETS = [
+
+    0.0000001,
+
+    0.011111,
+
+
+]  # Отступы для ордеров на покупку
+
+
+
+
+
+import logging
+
+# Инициализация логирования
+logger = logging.getLogger('my_logger')
+logger.setLevel(logging.INFO)
+
+# Удаление всех существующих обработчиков (на случай, если они уже существуют)
+if logger.hasHandlers():
+    logger.handlers.clear()
+
+# Создание обработчика для записи в файл
+fh = logging.FileHandler('/root/Desktop/log.log')
+fh.setLevel(logging.INFO)  # Записывать все сообщения в файл
+fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(fh)
+
+# Создание обработчика для вывода в консоль
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)  # Отображать все сообщения в консоли
+ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(ch)
+
+# Отключение распространения логов на родительский логгер
+logger.propagate = False
+
+
+try:
+
+    with open("/root/Desktop/api_keys.txt") as file:
+
+        api_key = file.readline().strip()
+
+        secret_key = file.readline().strip()
+
+except Exception as e:
+
+    logger.error(f"Ошибка при загрузке API ключей: {e}")
+
+    exit(1)
+
+
+
+exchange = ccxt_async.binance(
+
+    {
+
+        "apiKey": api_key,
+
+        "secret": secret_key,
+
+        "enableRateLimit": True,
+
+        "options": {"defaultType": "spot"},  # Указание на использование спотового кошелька
+
+    }
+
+)
+
+
+
+
+async def sell_remaining_assets():
+    """
+    Продает остаток монет по рынку, если он есть, кроме пары BNB/USDT.
+    """
+    balance = await exchange.fetch_balance()
+
+    for asset in balance['free']:
+        if asset != 'USDT' and asset != 'BNB' and balance['free'][asset] > 0.00000001:
+            try:
+                await exchange.create_market_sell_order(
+                    f"{asset}/USDT", balance['free'][asset]
+                )
+                logger.info(
+                    f"Остаток продан по рынку: {asset}/USDT, объем: {balance['free'][asset]}"
+                )
+            except Exception:
+                continue
+
+
+
+
+async def get_top_pairs(num_pairs):
+
+    """
+
+    Получает список доступных пар USDT и возвращает первые num_pairs пар.
+
+    """
+
+    try:
+
+        tickers = await exchange.load_markets()
+
+        usdt_pairs = [
+
+            pair for pair in tickers if pair.endswith("/USDT") and tickers[pair]["active"]
+
+        ]
+
+        return usdt_pairs[:num_pairs]
+
+    except Exception as e:
+
+        logger.error(f"Ошибка при загрузке данных о рынках: {e}")
+
+        exit(1)
+
+
+
+
+
+async def subscribe_to_pairs(pairs, initial_prices, current_prices):
+
+    """
+
+    Подписывается на получение цен по заданным парам и отслеживает изменения.
+
+
+
+    1. **В режиме реального времени мы получаем каждое изменение в цене по NUM_PAIRS криптовалютным парам.** (Этот пункт выполняется внутри цикла while True)
+
+    2. **Отслеживаем самые большие изменения в падении цены за ANALYSIS_WINDOW секунд.** (Этот пункт выполняется в функции calculate_percentage_changes)
+
+    """
+
+    while True:
+
+        try:
+
+            async with websockets.connect("wss://stream.binance.com:9443/stream") as websocket:
+
+                params = [f"{pair.replace('/', '').lower()}@ticker" for pair in pairs]
+
+                subscribe_msg = {"method": "SUBSCRIBE", "params": params, "id": 1}
+
+                await websocket.send(json.dumps(subscribe_msg))
+
+
+
+                start_time = time.time()
+
+
+
+                while True:
+
+                    message = await websocket.recv()
+
+                    data = json.loads(message)
+
+
+
+                    if "data" in data:
+
+                        pair_raw = data["data"]["s"]
+
+                        price = float(data["data"]["c"])
+
+
+
+                        if pair_raw.endswith("USDT"):
+
+                            pair = pair_raw[:-4] + "/USDT"
+
+                        else:
+
+                            logger.error(f"Неизвестная пара: {pair_raw}")
+
+                            continue
+
+
+
+                        if pair not in initial_prices:
+
+                            logger.error(f"Неизвестная пара: {pair}")
+
+                            continue
+
+
+
+                        current_time = time.time()
+
+                        current_prices[pair] = price
+
+                        initial_prices[pair].append(price)
+
+
+
+                        if len(initial_prices[pair]) > ANALYSIS_WINDOW:
+
+                            initial_prices[pair].pop(0)
+
+
+
+                        if current_time - start_time >= UPDATE_INTERVAL:
+
+                            start_time = current_time
+
+                            await calculate_percentage_changes(
+
+                                initial_prices, current_prices
+
+                            )
+
+
+
+        except websockets.exceptions.ConnectionClosedError as e:
+
+            logger.error(f"Соединение закрыто: {e}")
+
+            await asyncio.sleep(5)
+
+        except Exception as e:
+
+            logger.error(f"Ошибка в subscribe_to_pairs: {e}")
+
+
+
+
+
+async def calculate_percentage_changes(initial_prices, current_prices):
+
+    """
+
+    Рассчитывает процентные изменения цен и инициирует торговлю при достижении порога.
+
+    """
+
+    # Продаем остаток перед началом нового круга поиска валют
+
+    await sell_remaining_assets()
+
+
+
+    changes = {}
+
+    for pair in initial_prices:
+
+        if len(initial_prices[pair]) == ANALYSIS_WINDOW:
+
+            initial_price = initial_prices[pair][0]
+
+            current_price = initial_prices[pair][-1]
+
+            change = ((current_price - initial_price) / initial_price) * 100
+
+            changes[pair] = change
+
+
+
+    if changes:
+
+        min_change_pair = min(changes, key=changes.get)  # Найти минимальное изменение
+
+        min_change = changes[min_change_pair]
+
+
+
+        logger.info(f"Максимальное падение: {min_change_pair} на {min_change:.2f}%")
+
+
+
+        if min_change <= PERCENT_DROP_THRESHOLD:  # Порог падения
+
+            await execute_trade(
+
+                min_change_pair, current_prices[min_change_pair], initial_prices, current_prices
+
+            )
+
+
+async def get_current_candle(pair):
+    try:
+        ohlcv = await exchange.fetch_ohlcv(pair, timeframe='15m', limit=1)
+        if ohlcv:
+            return ohlcv[0]  # возвращает последнюю минутную свечу
+    except Exception as e:
+        logger.error(f"Ошибка при получении текущей свечи: {e}")
+    return None
+
+
+
+async def check_and_sell_remaining(pair):
+    """
+    Продаёт остаток монет по рынку, если он есть, кроме пары BNB/USDT.
+    """
+    base_currency = pair.split("/")[0]
+    if pair != "BNB/USDT" and base_currency != 'BNB':
+        balance = await exchange.fetch_balance()
+        if balance["free"][base_currency] > 0.0000001:
+            try:
+                await exchange.create_market_sell_order(
+                    pair, balance["free"][base_currency]
+                )
+                logger.info(
+                    f"Остаток продан по рынку: {pair}, объем: {balance['free'][base_currency]}"
+                )
+            except Exception as e:
+                logger.error(f"Ошибка при продаже остатка по рынку: {e}")
+    else:
+        logger.info(f"Остаток в {pair} не продается по рынку.")
+
+
+
+
+
+
+async def execute_trade(pair, price, initial_prices, current_prices):
+
+    """
+
+    Выставляет ордера на покупку и продажу.
+
+    """
+
+    logger.info(f"Открытие сделки по паре: {pair} по цене {price}")
+
+
+
+    balance = await exchange.fetch_balance()
+
+    usdt_balance = balance["free"]["USDT"]
+
+    required_amount = TRADE_AMOUNT / price
+
+
+
+    if usdt_balance < TRADE_AMOUNT:
+
+        logger.error(
+
+            f"Недостаточно средств для открытия сделки. Доступно: {usdt_balance}, необходимо: {TRADE_AMOUNT}"
+
+        )
+
+        return
+
+
+
+    buy_order_ids = []
+
+
+
+    # Выставление ордера на покупку по текущей цене
+
+    try:
+
+        buy_order = await exchange.create_limit_buy_order(
+
+            pair, required_amount, price
+
+        )
+
+        logger.info(
+
+            f"Ордер на покупку выставлен: {pair} по цене {price}, {buy_order['id']}"
+
+        )
+
+        buy_order_ids.append(buy_order["id"])
+
+    except Exception as e:
+
+        logger.error(f"Ошибка при выставлении ордера на покупку: {e}")
+
+
+
+    start_time = time.time()
+
+    filled_buy_orders = []
+
+
+
+    # Ожидание срабатывания ордера на покупку
+
+    while time.time() - start_time <= BUY_ORDER_TIMEOUT:
+
+        await asyncio.sleep(UPDATE_INTERVAL)
+
+        for i, buy_order_id in enumerate(buy_order_ids):
+
+            try:
+
+                order = await exchange.fetch_order(buy_order_id, pair)
+
+                if order["status"] == "closed":
+
+                    logger.info(
+
+                        f"Ордер на покупку выполнен: {pair} по цене {order['price']}, {order['id']}"
+
+                    )
+
+                    filled_buy_orders.append(order)
+
+                    buy_order_ids.pop(i)
+
+            except Exception as e:
+
+                logger.error(f"Ошибка при проверке ордера на покупку: {e}")
+
+        if filled_buy_orders:
+
+            break
+
+
+
+    # Если ни один ордер на покупку не сработал
+
+    if not filled_buy_orders:
+
+        logger.info(
+
+            f"Ни один ордер на покупку не сработал за {BUY_ORDER_TIMEOUT} секунд. Отмена ордера."
+
+        )
+
+        for buy_order_id in buy_order_ids:
+
+            try:
+
+                await exchange.cancel_order(buy_order_id, pair)
+
+                logger.info(f"Ордер на покупку отменен: {pair}, {buy_order_id}")
+
+            except Exception as e:
+
+                logger.error(f"Ошибка при отмене ордера на покупку: {e}")
+
+        await update_data(initial_prices, current_prices)
+
+        return
+
+
+
+    # Выставление ордера на продажу
+
+    sell_order_ids = []
+
+    for buy_order in filled_buy_orders:
+
+        sell_price = buy_order["price"] * (1 + PROFIT_TARGET / 100)
+
+        try:
+
+            sell_order = await exchange.create_limit_sell_order(
+
+                pair, buy_order["filled"], sell_price
+
+            )
+
+            logger.info(
+
+                f"Ордер на продажу выставлен: {pair} по цене {sell_price}, {sell_order['id']}"
+
+            )
+
+            sell_order_ids.append(sell_order["id"])
+
+        except Exception as e:
+
+            logger.error(f"Ошибка при выставлении ордера на продажу: {e}")
+
+
+
+    # Если все ордера на покупку сработали и выставлены все ордера на продажу
+
+    if len(filled_buy_orders) == 1:
+
+        logger.info("Ордер на покупку сработал и выставлен ордер на продажу. Завершение работы.")
+
+        exit(0)
+
+
+
+    start_time = time.time()
+
+
+
+    # Ожидание срабатывания ордера на продажу или истечения таймаута
+
+    while time.time() - start_time <= SELL_ORDER_TIMEOUT:
+
+        await asyncio.sleep(UPDATE_INTERVAL)
+
+
+
+        # Проверка срабатывания ордера на продажу
+
+        for i, sell_order_id in enumerate(sell_order_ids):
+
+            try:
+
+                sell_order = await exchange.fetch_order(sell_order_id, pair)
+
+                if sell_order["status"] == "closed":
+
+                    logger.info(
+
+                        f"Ордер на продажу выполнен: {pair} по цене {sell_order['price']}, {sell_order['id']}"
+
+                    )
+
+                    sell_order_ids.pop(i)
+
+            except Exception as e:
+
+                logger.error(f"Ошибка при проверке ордера на продажу: {e}")
+
+
+
+        # Если все ордера на продажу сработали
+
+        if not sell_order_ids:
+
+            logger.info("Все ордера на продажу выполнены.")
+
+            await check_and_sell_remaining(pair)
+
+            await update_data(initial_prices, current_prices)
+
+            break
+
+
+
+    # Если время ожидания продажи истекло
+
+    if sell_order_ids:
+
+        logger.info(f"Время ожидания продажи истекло. Отмена ордера.")
+
+        for sell_order_id in sell_order_ids:
+
+            try:
+
+                await exchange.cancel_order(sell_order_id, pair)
+
+                logger.info(f"Ордер на продажу отменен: {pair}, {sell_order_id}")
+
+            except Exception as e:
+
+                logger.error(f"Ошибка при отмене ордера на продажу: {e}")
+
+        await check_and_sell_remaining(pair)
+
+
+
+    await update_data(initial_prices, current_prices)
+
+
+
+
+
+async def update_data(initial_prices, current_prices):
+
+    """
+
+    Обновляет данные о парах и ценах.
+
+    """
+
+    pairs = await get_top_pairs(NUM_PAIRS)
+
+    logger.info(f"Обновление данных для пар: {pairs}")
+
+    initial_prices.clear()
+
+    initial_prices.update({pair: [] for pair in pairs})
+
+    current_prices.clear()
+
+    current_prices.update({pair: None for pair in pairs})
+
+
+
+
+
+async def main():
+
+    """
+
+    Запускает главный цикл программы.
+
+    """
+
+    pairs = await get_top_pairs(NUM_PAIRS)
+
+    logger.info(f"Мониторинг пар: {pairs}")
+
+
+
+    initial_prices = {pair: [] for pair in pairs}
+
+    current_prices = {pair: None for pair in pairs}
+
+
+
+    subscribe_task = asyncio.create_task(
+
+        subscribe_to_pairs(pairs, initial_prices, current_prices)
+
+    )
+
+    await subscribe_task
+
+
+
+
+
+if __name__ == "__main__":
+
+    asyncio.run(main())
+
