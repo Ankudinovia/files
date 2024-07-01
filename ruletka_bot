@@ -1,0 +1,780 @@
+import numpy as np
+import pyautogui
+import time
+import pandas as pd
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing.image import img_to_array
+from openpyxl import load_workbook
+import math
+import pyautogui
+import time
+import shutil
+import datetime
+import tkinter as tk
+import xlwings as xw
+import tkinter as tk
+import sys
+
+
+
+
+from gtts import gTTS
+import os
+from joblib import load
+
+
+
+
+import os
+import shutil
+
+
+
+
+def complex_random_number():
+    # Используем функцию randint из библиотеки numpy для создания массива случайных целых чисел
+    random_array = np.random.randint(0, 36, size=(22, 8, 94))  # Создаем трехмерный массив случайных целых чисел
+
+
+    # Производим сложные операции с массивом (например, взятие квадрата корня)
+    complex_result = random_array ** 2
+
+
+    # Возвращаем какое-то конкретное значение из полученного массива
+    return complex_result[10, 3, 46]
+
+
+
+
+# Путь к папке
+folder_path = r"C:\Users\Сдштшс\AppData\Local\Temp\Diagnostics\EXCEL"
+
+
+
+
+def load_model_and_scaler(model_path, scaler_path):
+    model = load_model(model_path)
+    scaler = load(scaler_path)
+    return model, scaler
+
+
+# Загрузка моделей и скалеров
+model1, scaler1 = load_model_and_scaler('C:/pred/5/1.joblib')
+model2, scaler2 = load_model_and_scaler('C:/pred/5/2.joblib')
+
+
+# Предсказание с использованием моделей
+def make_predictions_with_models(predictions_list):
+    if len(predictions_list) < 15:
+        return None, None  # Недостаточно данных для предсказания
+
+
+    # Преобразование и масштабирование данных
+    input_data = np.array(predictions_list).reshape(1, -1)
+    scaled_data1 = scaler1.transform(input_data)
+    scaled_data2 = scaler2.transform(input_data)
+
+
+    pred1 = model1.predict(scaled_data1)
+    pred2 = model2.predict(scaled_data2)
+   
+    return pred1, pred2
+
+
+def determine_inverted_result(pred1, pred2):
+    if pred1 > 0.5 and pred2 < 0.5:
+        return "EVEN"
+    elif pred1 < 0.5 and pred2 > 0.5:
+        return "ODD"
+    else:
+        return "Не ставим"
+
+
+def calculate_new_calculation_value(current_prediction, last_inverted_result):
+    if last_inverted_result == "Не ставим" or last_inverted_result is None:
+        return None  # Прогноза не было или нет предыдущего результата для сравнения
+
+
+    if (current_prediction == "EVEN" and last_inverted_result == "EVEN") or \
+       (current_prediction == "ODD" and last_inverted_result == "ODD"):
+        return 1  # Выигрыш
+    else:
+        return -1  # Проигрыш
+
+
+
+
+predictions_list = []
+
+
+def update_predictions_list(prediction):
+    global predictions_list
+    predictions_list.append(prediction)
+    if len(predictions_list) > 15:
+        predictions_list.pop(0)
+
+
+
+
+import pyttsx3
+
+
+def speak(text):
+    engine = pyttsx3.init()
+    engine.say(text)
+    engine.runAndWait()
+
+
+original_print = print
+
+
+def print_and_speak(text):
+    original_print(text)
+    speak(text)
+
+
+
+
+new_calculation_values = []
+number_predictions = []
+
+
+def click_at(x, y):
+    pyautogui.moveTo(x, y, duration=0.15)
+    pyautogui.click()
+    time.sleep(0.15)
+
+
+def bet_50_even():
+    click_at(585, 964)  # На стрелку
+    click_at(585, 964)  # На стрелку
+    click_at(706, 954)  # На 50
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+def bet_50_odd():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(706, 954)  # На 50
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+def bet_100_even():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(706, 954)  # На 50
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+def bet_100_odd():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(706, 954)  # На 50
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+def bet_200_even():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(706, 954)  # На 50
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+def bet_200_odd():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(706, 954)  # На 50
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+def bet_400_even():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(706, 954)  # На 50
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(829, 960)  # На 250
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+def bet_400_odd():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(706, 954)  # На 50
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(829, 960)  # На 250
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+def bet_800_even():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(706, 954)  # На 50
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(829, 960)  # На 250
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(956, 959)  # На 500
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+def bet_800_odd():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(706, 954)  # На 50
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(829, 960)  # На 250
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(956, 959)  # На 500
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+
+
+def bet_1600_even():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(706, 954)  # На 50
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(1089, 960)  # На 1000
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(956, 959)  # На 500
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+
+
+
+
+
+
+def bet_1600_odd():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(706, 954)  # На 50
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1089, 960)  # На 1000
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(956, 959)  # На 500
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+
+
+
+
+def bet_3200_even():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(706, 954)  # На 50
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(1089, 960)  # На 1000
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(1215, 956)  # На 2000
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+def bet_3200_odd():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(706, 954)  # На 50
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1089, 960)  # На 1000
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1215, 956)  # На 2000
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+
+
+
+
+def bet_6400_even():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(1216, 960)  # На 2000
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(954, 962)  # На 500
+    click_at(452, 957) # на пустое
+    click_at(588, 829)  # EVEN
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+
+
+def bet_6400_odd():
+    click_at(585, 964)
+    click_at(585, 964)
+    click_at(1216, 960)  # На 2000
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(954, 962)  # На 500
+    click_at(452, 957) # на пустое
+    click_at(1321, 831) # ODD
+    click_at(452, 957) # на пустое
+    click_at(1635, 963) # отмена
+
+
+
+
+
+
+
+
+def custom_rounding(number):
+    # Округление до ближайшего четного целого числа
+    if number % 2 != 0:
+        return math.ceil(number) if number % 1 > 0 else math.floor(number)
+    return round(number)
+
+
+
+
+model_path = 'C:/pred/5/12/model5.h5'  # Путь к вашей модели
+model = load_model(model_path)
+img_width, img_height = 130, 130
+ # Создаем пустой список для хранения предсказаний
+last_inverted_result = None  
+last_inverted_result2 = None
+
+
+excel_path = 'C:/pred/5/12/1.xlsx'  # Путь к файлу Excel
+excel_path1 = 'C:/pred/5/12/predictions1.xlsx'  # Путь к файлу Excel
+excel_path2 = 'C:/pred/5/12/predictions2.xlsx'  # Путь к файлу Excel для второй стратегии
+is_list_full = False
+
+
+
+
+def calculate_inverted_result(number):
+    rounded_number = custom_rounding(number)
+    inverted_result = "EVEN" if rounded_number % 2 == 0 else "ODD"
+    # Инвертируем результат
+    return inverted_result
+
+
+def load_and_prepare_image(img, img_width, img_height):
+    img = img.resize((img_width, img_height))
+    img = img_to_array(img)
+    img = img / 255.0
+    img = np.expand_dims(img, axis=0)
+    return img
+
+
+def append_to_excel(filename, data, row):
+    book = load_workbook(filename)
+    sheet = book.active
+    cell = f'A{row}'
+    sheet[cell] = data
+    book.save(filename)
+
+
+def read_from_excel(filename, cell):
+    book = load_workbook(filename, data_only=True)  # Используем data_only=True для получения результатов формул
+    sheet = book.active
+    return sheet[cell].value
+
+
+
+
+def append_to_excel_xlwings(filename, data, row):
+    with xw.App(visible=False) as app:
+        book = xw.Book(filename)
+        sheet = book.sheets['Sheet1']  # Укажите название вашего листа
+        sheet.range(f'A{row}').value = data
+        book.save()
+        book.close()
+
+
+def append_to_excel_xlwings2(filename, data, row):
+    with xw.App(visible=False) as app:
+        book = xw.Book(filename)
+        sheet = book.sheets['Sheet1']  # Укажите название вашего листа
+        sheet.range(f'B{row}').value = data
+        book.save()
+        book.close()
+
+
+def append_to_excel_xlwings3(filename, data, row):
+    with xw.App(visible=False) as app:
+        book = xw.Book(filename)
+        sheet = book.sheets['Sheet1']  # Укажите название вашего листа
+        sheet.range(f'C{row}').value = data
+        book.save()
+        book.close()
+
+
+def read_from_excel_xlwings(filename, cell):
+    with xw.App(visible=False) as app:
+        book = xw.Book(filename)
+        sheet = book.sheets['Sheet1']
+        value = sheet.range(cell).value
+        book.close()
+        return value if value is not None else None
+
+
+
+
+def make_bet(most_common_prediction, new_calculation_values, inverted_result):
+    # Проверка на "Не ставим"
+    if inverted_result == "Не ставим":
+        print("Стратегия рекомендует не ставить в этот раз.")
+        return
+
+
+    # Проверяем, что в списке есть хотя бы 4 значения
+    if len(number_predictions) < 15:
+        print("Недостаточно данных для ставки.")
+        return
+
+
+    bet_sizes = [50,100,200,400,800,1600]  # Размеры ставок
+    consecutive_losses = 0  # Считаем количество подряд идущих проигрышей
+    # Подсчет последовательных проигрышей
+    for value in reversed(new_calculation_values):
+        if value == -1:
+            consecutive_losses += 1
+        else:
+            break
+
+
+    # Если проигрыши подряд равны длине списка ставок, то это значит, что мы проиграли на максимальной ставке
+    if consecutive_losses == len(bet_sizes):
+        # Сброс на начальное состояние
+        new_calculation_values.clear()
+        consecutive_losses = 0
+
+
+
+
+
+
+    # Определение размера ставки
+    bet_index = min(consecutive_losses, len(bet_sizes) - 1)
+    bet_size = bet_sizes[bet_index]
+
+
+    # Вызов соответствующей функции ставки
+    bet_function = globals().get(f'make_bet_{bet_size}')
+    if bet_function:
+        bet_function(inverted_result)
+    else:
+        print(f"Функция для ставки размером {bet_size} не определена.")
+
+
+
+
+def make_bet_50(inverted_result):
+    if inverted_result == "Не ставим":
+        print("Стратегия рекомендует не ставить в этот раз.")
+        return
+    if inverted_result == 'EVEN':
+        bet_50_even()
+        print('ставка_50_четное')
+    else:
+        bet_50_odd()
+        print('ставка_50_нечетное')
+
+
+def make_bet_100(inverted_result):
+    if inverted_result == "Не ставим":
+        print("Стратегия рекомендует не ставить в этот раз.")
+        return
+    if inverted_result == 'EVEN':
+        bet_100_even()
+        print('ставка_100_четное')
+    else:
+        bet_100_odd()
+        print('ставка_100_нечетное')
+
+
+def make_bet_200(inverted_result):
+    if inverted_result == "Не ставим":
+        print("Стратегия рекомендует не ставить в этот раз.")
+        return
+    if inverted_result == 'EVEN':
+        bet_200_even()
+        print('ставка_200_четное')
+    else:
+        bet_200_odd()
+        print('ставка_200_нечетное')
+
+
+def make_bet_400(inverted_result):
+    if inverted_result == "Не ставим":
+        print("Стратегия рекомендует не ставить в этот раз.")
+        return
+    if inverted_result == 'EVEN':
+        bet_400_even()
+        print('ставка_400_четное')
+    else:
+        bet_400_odd()
+        print('ставка_400_нечетное')
+
+
+def make_bet_800(inverted_result):
+    if inverted_result == "Не ставим":
+        print("Стратегия рекомендует не ставить в этот раз.")
+        return
+    if inverted_result == 'EVEN':
+        bet_800_even()
+        print('ставка_800_четное')
+    else:
+        bet_800_odd()
+        print('ставка_800_нечетное')
+
+
+def make_bet_1600(inverted_result):
+    if inverted_result == "Не ставим":
+        print("Стратегия рекомендует не ставить в этот раз.")
+        return
+    if inverted_result == 'EVEN':
+        bet_1600_even()
+        print('ставка_1600_четное')
+    else:
+        bet_1600_odd()
+        print('ставка_1600_нечетное')
+
+
+def make_bet_3200(inverted_result):
+    if inverted_result == "Не ставим":
+        print("Стратегия рекомендует не ставить в этот раз.")
+        return
+    if inverted_result == 'EVEN':
+        bet_3200_even()
+        print('ставка_3200_четное')
+    else:
+        bet_3200_odd()
+        print('ставка_3200_нечетное')
+
+
+def make_bet_6400(inverted_result):
+    if inverted_result == "Не ставим":
+        print("Стратегия рекомендует не ставить в этот раз.")
+        return
+    if inverted_result == 'EVEN':
+        bet_6400_even()
+        print('ставка_6400_четное')
+    else:
+        bet_6400_odd()
+        print('ставка_6400_нечетное')
+
+
+
+
+
+
+#time.sleep(2)
+for cycle in range(4000):
+    #time.sleep(2)
+
+
+    inverted_result2 = None
+    if cycle != 0:
+        time.sleep(1)
+    click_at(1831, 948)
+    time.sleep(1.2)
+    # Нажатие мыши
+    new_calculations = []
+    predictions = []
+    for step in range(10):
+        # Создание скриншота
+        screenshot = pyautogui.screenshot(region=(889, 220, 130, 130))
+        screenshot_path = f'C:/pred/5/12/_/screenshot_cycle{cycle}_step{step}.png'
+        screenshot.save(screenshot_path)
+        img = load_and_prepare_image(screenshot, img_width, img_height)
+        prediction = model.predict(img, verbose=0)
+        predicted_class = np.argmax(prediction, axis=1)[0]
+        predictions.append(predicted_class)
+        #print(f'Cycle {cycle}, Step {step}, Predicted: {predicted_class}')
+        time.sleep(0.1)
+
+
+    # Фильтрация и анализ предсказаний
+    filtered_predictions = [pred for pred in predictions if pred != 37]
+
+
+    most_common_prediction = max(set(filtered_predictions), key=filtered_predictions.count) if filtered_predictions else None
+    update_predictions_list(most_common_prediction)
+    #print(f'Выпало число {cycle}: {most_common_prediction}')
+    print(f'Выпало число: {most_common_prediction}')
+    append_to_excel_xlwings(excel_path, most_common_prediction, cycle + 1)
+    number_predictions.append(most_common_prediction)
+
+
+    # Обновляем список, чтобы он содержал только последние 5 элементов
+    if len(number_predictions) > 15:
+        number_predictions = number_predictions[-15:]
+
+
+    if len(number_predictions) == 15:
+        #time.sleep(3)
+   
+        is_list_full = True
+
+
+        pred1, pred2 = make_predictions_with_models(predictions_list)
+        inverted_result = determine_inverted_result(pred1, pred2) if pred1 is not None else None
+        append_to_excel_xlwings2(excel_path, inverted_result, cycle + 2)
+
+
+        new_calculation_value = read_from_excel_xlwings(excel_path, f'C{cycle+1}')
+        if new_calculation_value is not None and new_calculation_value in [1, -1]:
+            if len(new_calculation_values) >= 7:  # Если в списке уже 5 элементов
+                new_calculation_values.pop(0)  # Удаляем самый старый элемент
+            new_calculation_values.append(new_calculation_value)  # Добавляем новый элемент
+
+
+
+
+        print(f'Стратегия говорит: {inverted_result}')
+        print(new_calculation_values)
+
+
+
+
+
+
+    else:
+        is_list_full = False
+   
+    last_inverted_result = inverted_result if is_list_full else None
+    #time.sleep(2)
+
+
+    if most_common_prediction is not None and is_list_full:
+        make_bet(most_common_prediction, new_calculation_values, inverted_result)
+        #time.sleep(2)
+    #time.sleep(2)
+
+
+#time.sleep(2)
+
+
+
+
+
