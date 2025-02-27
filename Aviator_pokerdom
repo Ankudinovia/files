@@ -1,0 +1,389 @@
+import pyautogui
+import pytesseract
+import time
+import random
+import os
+from datetime import datetime
+import re
+from collections import Counter
+import PIL
+
+# Укажите путь к вашему tesseract (для macOS M1/M2, как в примере)
+pytesseract.pytesseract.tesseract_cmd = r"/opt/homebrew/bin/tesseract"
+
+# Если нужно указать путь к tessdata (русские языковые модели),
+# раскомментируйте и поправьте путь:
+# os.environ["TESSDATA_PREFIX"] = "/path/to/tessdata/"
+
+# ----------------------------- НАСТРОЙКИ ------------------------------
+
+# Исходная ставка
+BASE_BET = 30
+
+# Координаты для различных действий (в формате (x1, y1, x2, y2)):
+# 1. Поле ввода ставки
+BET_INPUT_RECT = (543, 855, 587, 868)  # (левый верхний угол, правый нижний угол)
+# 1a. «Подтверждение» ввода после печати (условно или просто щелчки рядом)
+BET_CONFIRM_RECT = (471, 808, 582, 838)
+
+# 2. Кнопка «Старт» (условное название) 
+START_BUTTON_RECT = (651, 851, 869, 903)
+
+# 3a. Область, где ищем надпись "УЛЕТЕЛ!"
+ULETYEL_RECT = (883, 350, 1043, 386)  # (левый верхний, правый нижний)
+
+# 3b. Область, где берем итоговый коэффициент (вместе с «х»)
+COEFFICIENT_RECT = (692, 406, 1174, 501)
+
+# Папка, куда сохраняем скриншоты
+SCREENSHOT_FOLDER = "screenshots"
+
+# --------------------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ------------------------------
+
+WIN_RECT = (750, 54, 826, 71)
+
+def check_win():
+    """
+    Скринит область, ищет текст "ВЫИГРЫШ".
+    Возвращает (bool, file_path) - найдено ли "ВЫИГРЫШ" и путь к скриншоту.
+    """
+    shot, path_ = screenshot_region(WIN_RECT)
+    text = pytesseract.image_to_string(shot, lang='rus', config='--psm 7')
+    text = text.strip().upper()
+    if "ВЫИГРЫШ" in text:
+        return True, path_
+    return False, path_
+
+
+import pyttsx3
+
+def speak_coefficient(value):
+    """
+    Проговаривает число 'value' голосом.
+    Требует установленного pyttsx3.
+    """
+    engine = pyttsx3.init()
+    engine.say(f"Coefficient is {value}")
+    engine.runAndWait()
+
+
+
+def ensure_screenshot_folder_exists(folder: str):
+    """Убедимся, что папка для скриншотов существует."""
+    if not os.path.exists(folder):
+        os.makedirs(folder)
+
+def random_point_in_rect(x1, y1, x2, y2):
+    """
+    Возвращает случайную точку (x, y) внутри прямоугольника,
+    заданного двумя диагональными точками (x1, y1) и (x2, y2).
+    Предполагается, что x1 < x2 и y1 < y2.
+    """
+    rx = random.randint(x1, x2)
+    ry = random.randint(y1, y2)
+    return rx, ry
+
+def human_move_and_click(x, y, duration_min=0.1, duration_max=0.4):
+    """
+    Плавное перемещение курсора в точку (x, y) и клик.
+    Задержка перемещения тоже рандомизируется, чтобы имитировать «человеческое».
+    """
+    move_duration = random.uniform(duration_min, duration_max)
+    pyautogui.moveTo(x, y, duration=move_duration, tween=pyautogui.easeInOutQuad)
+    pyautogui.click()
+
+def random_sleep(min_s, max_s):
+    """Случайная пауза в заданном диапазоне [min_s, max_s]."""
+    time.sleep(random.uniform(min_s, max_s))
+
+def enter_bet_amount(bet_amount: int):
+    """
+    1. Тройной клик в области (603,853)-(603,868).
+    2. Удаляем 6 символов (backspace).
+    3. Вводим размер ставки.
+    4. Подтверждаем 1–2 кликами.
+    """
+    # --- 1. Тройной клик в одной области ---
+    for _ in range(3):
+        x_input, y_input = random_point_in_rect(603, 853, 603, 868)
+        pyautogui.moveTo(x_input, y_input, duration=0)
+        pyautogui.click()
+
+    # --- 2. Удаляем 6 символов слева ---
+    for _ in range(10):
+        pyautogui.press('backspace')
+
+    # --- 3. Вводим ставку ---
+    pyautogui.typewrite(str(bet_amount), interval=random.uniform(0.02, 0.05))
+
+    # --- 4. Подтверждаем (1–2 клика) ---
+    confirm_clicks = random.randint(1, 2)
+    x_confirm, y_confirm = random_point_in_rect(*BET_CONFIRM_RECT)
+    pyautogui.moveTo(x_confirm, y_confirm, duration=0)
+    for _ in range(confirm_clicks):
+        pyautogui.click()
+
+
+
+def click_start_button():
+    """
+    Один раз нажимаем на кнопку «Старт» с «долгим» удержанием ~0.2с.
+    """
+    # Случайная точка в прямоугольнике кнопки
+    x, y = random_point_in_rect(651, 851, 869, 903)
+    
+    # Можно плавно переместить курсор (0.05-0.15с)
+    move_duration = random.uniform(0.05, 0.15)
+    pyautogui.moveTo(x, y, duration=move_duration, tween=pyautogui.easeInOutQuad)
+    
+    # Делаем «долгое» нажатие:
+    pyautogui.mouseDown()
+    time.sleep(random.uniform(0.2, 0.3))  # держим 0.2-0.3 секунды
+    pyautogui.mouseUp()
+
+
+
+def screenshot_region(region, folder=SCREENSHOT_FOLDER):
+    """
+    Делает скриншот заданной области region=(x1, y1, x2, y2),
+    сохраняет в папку и возвращает PIL-объект скриншота.
+    """
+    x1, y1, x2, y2 = region
+    width = x2 - x1
+    height = y2 - y1
+    screenshot_img = pyautogui.screenshot(region=(x1, y1, width, height))
+    
+    # Сохраняем скриншот с таймстемпом
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    filepath = os.path.join(folder, f"screenshot_{timestamp}.png")
+    screenshot_img.save(filepath)
+    
+    return screenshot_img, filepath
+
+def check_uletyel():
+    """
+    Скринит область, ищет текст "УЛЕТЕЛ!".
+    Возвращает (bool, file_path) - найдено ли "УЛЕТЕЛ!" и путь к скриншоту.
+    """
+    shot, path_ = screenshot_region(ULETYEL_RECT)
+    # Распознаём текст (русский)
+    text = pytesseract.image_to_string(shot, lang='rus', config='--psm 7')
+    # Очищаем от лишних пробелов и переводов строк
+    text = text.strip().upper()
+    # Сравниваем
+    if "УЛЕТЕЛ" in text:
+        return True, path_
+    return False, path_
+
+import re
+
+def parse_coefficient(text: str) -> float:
+    """
+    Ищет в тексте шаблон вида [числа с точкой/запятой] + [x/х] (любой регистр).
+    Возвращает float или None, если распарсить не удалось.
+    """
+    # Приведём текст к «упрощённому» виду: 
+    # - убираем пробелы и переносы строк
+    # - заменяем запятые на точки
+    text_clean = text.replace(" ", "").replace("\n", "").replace(",", ".")
+
+    # Иногда OCR может распознать «х» как "x" или наоборот,
+    # поэтому будем искать и кириллическую х, и латинскую x (регистронезависимо):
+    match = re.search(r"([\d\.]+)[XxХх]", text_clean)
+    if match:
+        val_str = match.group(1)
+        try:
+            return float(val_str)
+        except ValueError:
+            return None
+    return None
+
+
+from collections import Counter
+import PIL
+from PIL import Image, ImageOps
+
+def highlight_red_text(img, r_min=150, g_max=120, b_max=120):
+    """
+    Выделяем только «красные» пиксели:
+    - Если R > r_min и G < g_max, B < b_max — делаем пиксель белым.
+    - Иначе чёрным.
+    Возвращаем ч/б (mode='1') изображение.
+    """
+    rgb = img.convert('RGB')
+    w, h = rgb.size
+    
+    bw = Image.new('1', (w, h), 0)
+    bw_px = bw.load()
+    rgb_px = rgb.load()
+    
+    for x in range(w):
+        for y in range(h):
+            r, g, b = rgb_px[x, y]
+            if (r > r_min) and (g < g_max) and (b < b_max):
+                bw_px[x, y] = 1  # белый
+    return bw
+
+def binarize_grayscale(img, threshold=160):
+    """
+    Превращаем в градации серого, затем бинаризуем порогом threshold.
+    0..255 -> < threshold => 0 (чёрный), иначе 255 (белый).
+    Возвращаем изображение mode='1'.
+    """
+    gray = img.convert('L')
+    bw = gray.point(lambda x: 255 if x >= threshold else 0, '1')
+    return bw
+
+def tesseract_whitelist_ocr(pil_image, lang='rus'):
+    """
+    Распознаём Tesseract'ом в режиме psm=7, oem=3,
+    разрешая только [0123456789xXхХ.].
+    """
+    custom_config = (
+        "--psm 7 --oem 3 "
+        "-c tessedit_char_whitelist=0123456789xXхХ."
+    )
+    text = pytesseract.image_to_string(pil_image, lang=lang, config=custom_config)
+    return text
+
+def multi_process_image(img):
+    """
+    Перебираем несколько методов:
+      - Пороговая бинаризация с threshold=120,140,160,180
+      - + инверсия / без инверсии
+      (Итого 8 вариантов)
+    Складываем все результаты OCR в список.
+    """
+    results_text = []
+    
+    thresholds = [30, 60, 120, 180, 250, 500]
+    variants = []
+
+    # Сразу делаем RGB и Invert
+    rgb_img = img.convert('RGB')
+    inv_img = ImageOps.invert(rgb_img)
+
+    for t in thresholds:
+        # Обычный
+        bw = rgb_img.convert('L').point(lambda x: 255 if x>=t else 0, '1')
+        bw_resized = bw.resize((bw.width*2, bw.height*2), Image.LANCZOS)
+        txt = tesseract_whitelist_ocr(bw_resized)
+        results_text.append(txt)
+
+        # Инверт
+        bw_inv = inv_img.convert('L').point(lambda x: 255 if x>=t else 0, '1')
+        bw_inv_resized = bw_inv.resize((bw_inv.width*2, bw_inv.height*2), Image.LANCZOS)
+        txt_inv = tesseract_whitelist_ocr(bw_inv_resized)
+        results_text.append(txt_inv)
+    
+    return results_text
+
+def get_coefficient():
+    """
+    1) Делаем несколько (attempts) скриншотов подряд.
+    2) Для каждого скриншота прогоняем 3 метода обработки (подсветка красного, binary, invert).
+    3) Каждую строку пропускаем через parse_coefficient -> float или None.
+    4) Все float-счения складываем в общий список.
+    5) Если список не пуст, majority-голосование, иначе None.
+    """
+    attempts = 5  # Сколько скриншотов делаем (можете изменить)
+    all_values = []
+    
+    for _ in range(attempts):
+        shot, path_ = screenshot_region(COEFFICIENT_RECT)
+        
+        # Прогоняем 3 способа обработки
+        list_of_texts = multi_process_image(shot)
+        
+        # Парсим каждую строку
+        for raw_text in list_of_texts:
+            parsed_val = parse_coefficient(raw_text)
+            if parsed_val is not None:
+                all_values.append(parsed_val)
+        
+        # Короткая пауза между скриншотами
+        time.sleep(0.01)
+    
+    # Если не смогли извлечь ни одного float
+    if not all_values:
+        return None
+    
+    # Голосование (most_common) или медиана
+    # (если есть явный лидер, берём его, иначе медиану)
+    counter = Counter(all_values)
+    most_common_value, cnt = counter.most_common(1)[0]
+    
+    if cnt > 1:
+        return most_common_value
+    else:
+        # все разные, берём медиану
+        all_values.sort()
+        mid = len(all_values) // 2
+        return all_values[mid]
+
+
+
+# --------------------------- ОСНОВНОЙ ЦИКЛ ------------------------------
+
+def main():
+    ensure_screenshot_folder_exists(SCREENSHOT_FOLDER)
+    
+    print("Запуск бота. Ждём 2 секунды, чтобы успеть открыть окно казино...")
+    time.sleep(2)
+    
+    step_number = 0
+    
+    # Лесенка ставок
+    #progression = [30, 30, 90, 150, 330, 630, 1290, 2550, 5130]
+    progression = [30,60,120,240,480,960,1920, 3840, 7680]
+    progression_index = 0
+    current_bet = progression[progression_index]
+
+    while True:
+        step_number += 1
+        print(f"\n--- Шаг игры #{step_number}. Ставка: {current_bet} ---")
+        
+        # 1. Вводим ставку
+        enter_bet_amount(current_bet)
+        
+        # 2. Нажимаем на кнопку «Старт»
+        click_start_button()
+        
+        # 3. Ждём конца раунда: «УЛЕТЕЛ!»
+        #    но при этом следим, появится ли «ВЫИГРЫШ» (до «УЛЕТЕЛ!»).
+        win_found = False
+
+        while True:
+            # Если ещё не видели "ВЫИГРЫШ", то проверяем его
+            if not win_found:
+                is_win, win_path = check_win()
+                if is_win:
+                    print(f"Надпись 'ВЫИГРЫШ' найдена! (скрин: {win_path})")
+                    win_found = True
+
+            # Проверяем "УЛЕТЕЛ!"
+            is_lose, lose_path = check_uletyel()
+            if is_lose:
+                print(f"Надпись 'УЛЕТЕЛ!' найдена! (скрин: {lose_path})")
+                # Раунд окончен — сразу выходим из внутреннего цикла
+                break
+
+            # Небольшая пауза, чтобы не спамить скриншотами
+            time.sleep(0.05)
+        
+        # 4. Как только увидели "УЛЕТЕЛ!", определяем исход
+        if win_found:
+            print("Ставка выиграла! Сбрасываем лесенку в начало.")
+            progression_index = 0
+            current_bet = progression[progression_index]
+        else:
+            print("Ставка проиграла! Переходим к следующему шагу в лесенке.")
+            if progression_index < len(progression) - 1:
+                progression_index += 1
+            current_bet = progression[progression_index]
+        
+        # (По желанию) небольшая пауза перед следующим раундом
+        time.sleep(1.0)
+
+if __name__ == "__main__":
+    main()
