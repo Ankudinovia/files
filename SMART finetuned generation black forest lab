@@ -1,0 +1,464 @@
+# умная генерация изображений, используем построение, затем оценку схожести с оригиналами, затем повторное построение с другими параметрами, управляется итерациями
+
+# -*- coding: utf-8 -*-
+import requests
+import time
+import base64
+import os
+import optuna # Для оптимизации гиперпараметров
+import numpy as np
+from deepface import DeepFace # Для оценки схожести лиц
+import pandas as pd # Для вывода результатов в таблице
+import io # Для работы с байтами изображения (хотя прямо тут не используется, может пригодиться)
+import logging # Для управления уровнем вывода сообщений (например, от DeepFace)
+
+# --- Базовая Настройка Логгирования ---
+# Уменьшаем количество сообщений от TensorFlow/Keras (часто используются DeepFace)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' # 0 = все, 1 = INFO, 2 = WARNING, 3 = ERROR
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
+# Можно также настроить уровень для Optuna, если нужно меньше сообщений
+# optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+print("--- Скрипт Оптимизации Генерации Изображений с Оценкой DeepFace ---")
+
+# ==============================================================================
+# >>> НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ <<<
+# ==============================================================================
+
+# --- API и Модель ---
+API_KEY = "157aaba6-39e8-4d68-965b-e61efa574674"  # Замените на ваш реальный API-ключ
+FINETUNE_ID = "634f326c-1481-4aa3-8b7c-1a0ac14a606d" # Замените на ваш реальный finetune_id
+# Путь к вашему локальному *исходному* изображению (для image_prompt)
+INITIAL_IMAGE_PATH = "/Users/ivan/Downloads/tere.jpg"  # Замените на реальный путь
+
+# --- Эталонные Изображения для Сравнения ---
+# Список путей к 5 (или более) эталонным изображениям из обучающего набора LORA
+REFERENCE_IMAGE_PATHS = [
+    "/Users/ivan/Downloads/lastPhoto/5.jpg",
+    "/Users/ivan/Downloads/lastPhoto/8.jpg",
+    "/Users/ivan/Downloads/lastPhoto/11.jpg",
+    "/Users/ivan/Downloads/lastPhoto/17.jpg",
+    "/Users/ivan/Downloads/lastPhoto/34.jpg",
+    "/Users/ivan/Downloads/lastPhoto/38.jpg",
+    "/Users/ivan/Downloads/lastPhoto/53.jpg",
+    # Добавьте/замените пути к вашим эталонным изображениям
+]
+
+# --- Параметры Оптимизации Optuna ---
+# Количество комбинаций гиперпараметров, которые нужно попробовать
+NUM_TRIALS = 10 # Установите желаемое количество (например, 5, 20, 50)
+
+# Диапазоны поиска для гиперпараметров (Исключен 'steps')
+HYPERPARAMETER_RANGES = {
+    # Формат: "имя_параметра": (минимальное_значение, максимальное_значение)
+    "finetune_strength": (0.8, 1.4), # Сила влияния LoRA
+    "image_prompt_strength": (0.1, 0.99), # Сила влияния исходного изображения
+    "guidance": (1.5, 8.5) # Насколько сильно следовать промпту (CFG)
+}
+# Фиксированное значение steps
+FIXED_STEPS = 40
+
+# --- Параметры Оценки Сходства (DeepFace) ---
+# Модели для ансамбля DeepFace (как в вашем скрипте)
+DEEPFACE_ENSEMBLE_MODELS = ['ArcFace', 'Facenet512', 'SFace']
+# Детектор лиц для DeepFace (как в вашем скрипте)
+DEEPFACE_DETECTOR_BACKEND = "retinaface"
+
+# --- Выходная Директория ---
+# Папка для сохранения сгенерированных изображений и логов Optuna
+OUTPUT_DIR = "generation_optimization_output"
+
+# ==============================================================================
+# >>> ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ <<<
+# ==============================================================================
+
+def encode_image_to_base64(image_path):
+    """Кодирует локальное изображение в base64 строку."""
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Файл не найден: {image_path}")
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode("utf-8")
+
+def calculate_similarity_percentage(distance, threshold):
+    """
+    Рассчитывает процент схожести для DeepFace моделей на основе дистанции и порога.
+    Скопировано из вашего скрипта.
+    """
+    if distance is None or threshold is None: return 0.0
+    if distance > threshold:
+        return 0.0
+    else:
+        # Линейная интерполяция: 0 -> 100%, threshold -> 0%
+        return max(0.0, (threshold - distance) / threshold) * 100
+
+def calculate_deepface_avg_similarity(generated_image_path, reference_paths):
+    """
+    Вычисляет среднюю схожесть (avg_deepface_confidence) между одним сгенерированным
+    изображением и списком эталонных изображений, используя ансамбль моделей DeepFace.
+    """
+    if not os.path.exists(generated_image_path):
+        print(f"  Предупреждение (DeepFace): Сгенерированный файл не найден {generated_image_path}")
+        return 0.0
+
+    all_reference_avg_confidences = []
+
+    print(f"  Оценка DeepFace для {os.path.basename(generated_image_path)}:")
+
+    for ref_path in reference_paths:
+        if not os.path.exists(ref_path):
+            print(f"    Предупреждение: Эталонный файл не найден {ref_path}, пропускаем.")
+            continue
+
+        individual_model_confidences = []
+        # print(f"    Сравнение с {os.path.basename(ref_path)}:") # Раскомментируйте для большей детализации
+
+        for model_name in DEEPFACE_ENSEMBLE_MODELS:
+            try:
+                result = DeepFace.verify(
+                    img1_path=ref_path, # Эталон
+                    img2_path=generated_image_path, # Сгенерированное
+                    model_name=model_name,
+                    detector_backend=DEEPFACE_DETECTOR_BACKEND,
+                    align=True,
+                    enforce_detection=True, # Важно: Ошибка, если лицо не найдено
+                    silent=True # Меньше логов от DeepFace
+                )
+                distance = result.get("distance")
+                threshold = result.get("threshold")
+                confidence = calculate_similarity_percentage(distance, threshold)
+                individual_model_confidences.append(confidence)
+                # print(f"      - {model_name}: {confidence:.2f}%") # Детализация по моделям
+
+            except ValueError as e:
+                # Чаще всего ошибка "Face could not be detected..."
+                # print(f"      - {model_name}: Ошибка верификации (вероятно, лицо не найдено) - {e}")
+                individual_model_confidences.append(0.0) # Считаем схожесть 0 при ошибке
+            except Exception as e:
+                print(f"      - {model_name}: Неожиданная ошибка DeepFace.verify - {e}")
+                individual_model_confidences.append(0.0)
+
+        # Средняя уверенность для *данного* эталонного изображения
+        if individual_model_confidences:
+            avg_confidence_for_ref = np.mean(individual_model_confidences)
+            all_reference_avg_confidences.append(avg_confidence_for_ref)
+            # print(f"    Средняя схожесть с {os.path.basename(ref_path)}: {avg_confidence_for_ref:.2f}%")
+        else:
+             # print(f"    Не удалось получить оценки для {os.path.basename(ref_path)}")
+             # Можно добавить 0.0, чтобы штрафовать, если ни одна модель не сработала
+             all_reference_avg_confidences.append(0.0)
+
+
+    # Финальное усреднение по всем эталонным изображениям
+    if not all_reference_avg_confidences:
+        print("  Не удалось сравнить ни с одним эталонным изображением.")
+        final_average_score = 0.0
+    else:
+        final_average_score = np.mean(all_reference_avg_confidences)
+
+    print(f"  ИТОГОВАЯ СРЕДНЯЯ СХОЖЕСТЬ (DeepFace Avg): {final_average_score:.4f}%")
+    return final_average_score / 100.0 # Optuna обычно работает со значениями [0, 1]
+
+# ==============================================================================
+# >>> ФУНКЦИИ ВЗАИМОДЕЙСТВИЯ С API <<<
+# ==============================================================================
+
+def submit_finetuned_generation(api_key, finetune_id, image_path, params):
+    """Отправляет запрос на генерацию изображения с заданными гиперпараметрами."""
+    url = "https://api.us1.bfl.ai/v1/flux-pro-1.1-ultra-finetuned"
+
+    try:
+        image_prompt_base64 = encode_image_to_base64(image_path)
+    except FileNotFoundError as e:
+        print(f"Критическая ошибка: Не найдено исходное изображение {image_path}")
+        raise e # Прерываем выполнение, если исходного изображения нет
+
+    # Формируем payload с параметрами из Optuna и фиксированными значениями
+    payload = {
+        "finetune_id": finetune_id,
+        "finetune_strength": params['finetune_strength'],
+        "prompt": """
+
+A high-resolution photograph of ANKUDINOVIVAN13 with short, dark brown hair, styled in a slightly tousled, voluminous manner with a few strands falling loosely around the sides. They are dressed in a crisp white button-up shirt, with the top few buttons undone, revealing a glimpse of the chest for a relaxed yet sophisticated look. A dark navy bow tie with a subtle pattern hangs loosely around the neck, adding a touch of formality to the otherwise casual ensemble. Accessories include a thin black beaded necklace, visible at the open collar, and a silver ring on the left hand, catching the light subtly. No makeup is visible, keeping the appearance natural and polished. The pose is confident and engaging: the person stands straight, slightly turned to the side, with one hand holding the bow tie near the collar and the other resting by their side. Their gaze is directed straight at the camera, with a subtle, closed-lip smile that exudes confidence and charm. The background is a plain, light gray studio setting, ensuring the focus remains on the subject and their outfit. The lighting is soft and even, likely artificial, casting gentle highlights on the white shirt and the bow tie while maintaining clarity in the details of the accessories. The shot captures the upper body, with the camera angle at eye level, emphasizing the person’s poised demeanor and the contrast between the white shirt and the dark bow tie.
+
+""", # Ваш стандартизированный промпт
+        "negative_prompt": "ugly, deformed, blurry, low quality, text, watermark, signature, noisy, grainy, worst quality, lowres, multiple people",
+        "image_prompt": image_prompt_base64,
+        "image_prompt_strength": params['image_prompt_strength'],
+        "aspect_ratio": "9:16",
+        "steps": FIXED_STEPS, # Используем фиксированное значение
+        "guidance": params['guidance'],
+        "prompt_upsampling": False,
+        "seed": 42, # Можно сделать None для разнообразия или фиксировать для воспроизводимости
+        "safety_tolerance": 1,
+        "output_format": "jpeg" # Важно для оценки и сохранения
+    }
+
+    headers = {
+        "x-key": api_key,
+        "accept": "application/json",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status() # Вызовет исключение для кодов 4xx/5xx
+        print(f"Запрос (Параметры: finetune_str={params['finetune_strength']:.2f}, "
+              f"img_str={params['image_prompt_strength']:.2f}, guid={params['guidance']:.2f}) "
+              f"отправлен! Статус: {response.status_code}")
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Ошибка при отправке запроса API: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Ответ сервера: {e.response.text}")
+        return None
+
+def check_generation_result(task_id, api_key):
+    """Проверяет статус задачи генерации и возвращает URL готового изображения."""
+    url = "https://api.us1.bfl.ai/v1/get_result"
+    headers = {"x-key": api_key, "accept": "application/json"}
+    params = {"id": task_id}
+
+    max_retries = 30 # Ожидание до 5 минут
+    retry_delay = 10 # Задержка между проверками
+
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            result = response.json()
+            status = result.get("status")
+            print(f"  Проверка задачи {task_id} (Попытка {attempt + 1}/{max_retries}): Статус = {status}")
+
+            if status == "Ready":
+                # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+                # Ищем URL в поле 'sample', а не 'url'
+                image_url = result.get("result", {}).get("sample")
+                # -----------------------
+                if image_url:
+                    print(f"  Генерация {task_id} завершена! URL получен.")
+                    return image_url
+                else:
+                    # Эта ошибка теперь маловероятна, но оставим для полноты
+                    print(f"  Ошибка: Статус 'Ready', но URL результата (в поле 'sample') отсутствует в ответе: {result}")
+                    return None
+            elif status in ["Error", "Content Moderated", "Request Moderated"]:
+                print(f"  Ошибка или модерация задачи {task_id}: {result}")
+                return None
+            elif status in ["Pending", "Processing"]:
+                time.sleep(retry_delay) # Ожидаем перед следующей проверкой
+            else:
+                print(f"  Неизвестный статус задачи {task_id}: {status}. Ответ: {result}")
+                time.sleep(retry_delay)
+
+        except requests.exceptions.RequestException as e:
+            print(f"  Ошибка при проверке статуса задачи {task_id}: {str(e)}")
+            time.sleep(retry_delay) # Ждем перед повторной попыткой
+        except Exception as e:
+            print(f"  Непредвиденная ошибка при обработке ответа для {task_id}: {e}")
+            return None
+
+    print(f"  Задача {task_id} не завершилась за {max_retries * retry_delay} секунд (таймаут).")
+    return None
+
+def download_image(image_url, save_path):
+    """Скачивает изображение по URL и сохраняет его локально."""
+    try:
+        response = requests.get(image_url, stream=True, timeout=60) # Таймаут на скачивание
+        response.raise_for_status()
+        with open(save_path, 'wb') as f:
+            for chunk in response.iter_content(8192): # Увеличенный размер чанка
+                f.write(chunk)
+        print(f"  Изображение успешно сохранено: {save_path}")
+        return True
+    except requests.exceptions.RequestException as e:
+        print(f"  Ошибка скачивания изображения {image_url}: {e}")
+        return False
+    except Exception as e:
+        print(f"  Ошибка при сохранении файла {save_path}: {e}")
+        return False
+
+# ==============================================================================
+# >>> ЦЕЛЕВАЯ ФУНКЦИЯ ДЛЯ OPTUNA <<<
+# ==============================================================================
+
+def objective(trial):
+    """
+    Выполняет один шаг оптимизации: генерирует изображение с параметрами,
+    предложенными Optuna, оценивает его схожесть с эталонами и возвращает оценку.
+    """
+    # 1. Получаем гиперпараметры для текущей пробы от Optuna
+    params = {}
+    for name, (low, high) in HYPERPARAMETER_RANGES.items():
+        if isinstance(low, int) and isinstance(high, int):
+             # Если нужны целые числа (здесь не используется, но для примера)
+             params[name] = trial.suggest_int(name, low, high)
+        else:
+             params[name] = trial.suggest_float(name, low, high)
+
+    print(f"\n--- Проба {trial.number}/{NUM_TRIALS-1} ---")
+    print(f"Параметры для пробы: {params}")
+
+    # 2. Отправляем запрос на генерацию изображения
+    task_data = submit_finetuned_generation(API_KEY, FINETUNE_ID, INITIAL_IMAGE_PATH, params)
+
+    if not task_data or "id" not in task_data:
+        print(f"Проба {trial.number}: Не удалось отправить задачу на генерацию. Пропускаем пробу.")
+        # Можно вернуть очень низкую оценку или вызвать исключение Pruned
+        return 0.0 # Низкая оценка для неудачных проб
+        # raise optuna.exceptions.TrialPruned() # Сообщить Optuna, чтобы проигнорировать
+
+    task_id = task_data["id"]
+    print(f"Проба {trial.number}: ID задачи = {task_id}")
+
+    # 3. Ожидаем результат генерации (URL изображения)
+    image_url = check_generation_result(task_id, API_KEY)
+
+    if not image_url:
+        print(f"Проба {trial.number}: Не удалось получить результат генерации для задачи {task_id}. Пропускаем пробу.")
+        return 0.0
+        # raise optuna.exceptions.TrialPruned()
+
+    # 4. Скачиваем сгенерированное изображение
+    # Генерируем имя файла для сохранения
+    generated_image_filename = f"trial_{trial.number:03d}_{task_id}.jpeg"
+    generated_image_path = os.path.join(OUTPUT_DIR, generated_image_filename)
+
+    if not download_image(image_url, generated_image_path):
+        print(f"Проба {trial.number}: Не удалось скачать/сохранить изображение {image_url}. Пропускаем пробу.")
+        return 0.0
+        # raise optuna.exceptions.TrialPruned()
+
+    # 5. Оцениваем схожесть сгенерированного изображения с эталонами
+    try:
+        # Используем нашу функцию, которая считает средний DeepFace Avg по всем эталонам
+        similarity_score = calculate_deepface_avg_similarity(generated_image_path, REFERENCE_IMAGE_PATHS)
+    except Exception as e:
+        print(f"Проба {trial.number}: Ошибка во время оценки схожести: {e}")
+        similarity_score = 0.0 # Низкая оценка при ошибке в оценке
+
+    print(f"Проба {trial.number}: Итоговая оценка схожести = {similarity_score:.6f}")
+
+    # 6. Возвращаем оценку Optuna (чем выше, тем лучше)
+    return similarity_score
+
+# ==============================================================================
+# >>> ОСНОВНОЙ БЛОК ЗАПУСКА ОПТИМИЗАЦИИ <<<
+# ==============================================================================
+
+if __name__ == "__main__":
+    # --- Предварительные Проверки ---
+    print("\n--- Начало Проверок ---")
+    # Проверка наличия исходного изображения
+    if not os.path.exists(INITIAL_IMAGE_PATH):
+        print(f"КРИТИЧЕСКАЯ ОШИБКА: Исходное изображение НЕ НАЙДЕНО по пути: {INITIAL_IMAGE_PATH}")
+        exit()
+    else:
+        print(f"Исходное изображение найдено: {INITIAL_IMAGE_PATH}")
+
+    # Проверка наличия эталонных изображений
+    if not REFERENCE_IMAGE_PATHS:
+         print("КРИТИЧЕСКАЯ ОШИБКА: Список эталонных изображений (REFERENCE_IMAGE_PATHS) пуст!")
+         exit()
+    missing_refs = [p for p in REFERENCE_IMAGE_PATHS if not os.path.exists(p)]
+    if missing_refs:
+        print(f"КРИТИЧЕСКАЯ ОШИБКА: Следующие эталонные изображения НЕ НАЙДЕНЫ:")
+        for p in missing_refs:
+            print(f" - {p}")
+        exit()
+    else:
+        print(f"Все {len(REFERENCE_IMAGE_PATHS)} эталонных изображений найдены.")
+
+    # Создание выходной директории
+    try:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        print(f"Директория для результатов создана/существует: {OUTPUT_DIR}")
+    except OSError as e:
+        print(f"КРИТИЧЕСКАЯ ОШИБКА: Не удалось создать директорию {OUTPUT_DIR}: {e}")
+        exit()
+    print("--- Проверки Завершены ---\n")
+
+    # --- Запуск Оптимизации Optuna ---
+    print(f"Запуск оптимизации гиперпараметров на {NUM_TRIALS} проб...")
+    print(f"Параметры для оптимизации и их диапазоны:")
+    for name, (low, high) in HYPERPARAMETER_RANGES.items():
+        print(f"  - {name}: от {low} до {high}")
+    print(f"Фиксированное количество шагов (steps): {FIXED_STEPS}")
+    print("-" * 40)
+
+    # Создаем "исследование" Optuna.
+    # direction="maximize": Мы хотим максимизировать оценку схожести.
+    # storage: Можно указать файл SQLite для сохранения прогресса (`sqlite:///optimization_study.db`)
+    # pruner: Можно добавить прунер для отсеивания бесперспективных проб раньше (например, MedianPruner)
+    study = optuna.create_study(direction="maximize")
+
+    # Запускаем сам процесс оптимизации
+    try:
+        study.optimize(
+            objective,
+            n_trials=NUM_TRIALS,
+            # timeout=3600 # Можно добавить ограничение по времени в секундах (например, 1 час)
+            gc_after_trial=True # Попытка освободить память после каждой пробы
+        )
+    except KeyboardInterrupt:
+        print("\nОптимизация прервана пользователем (Ctrl+C).")
+    except FileNotFoundError as e:
+        print(f"\nКРИТИЧЕСКАЯ ОШИБКА во время оптимизации: {e}. Проверьте пути к файлам.")
+    except Exception as e:
+        print(f"\nПроизошла непредвиденная ошибка во время оптимизации: {e}")
+        # Можно вывести traceback для отладки
+        import traceback
+        traceback.print_exc()
+
+    # --- Вывод Результатов Оптимизации ---
+    print("\n" + "=" * 50)
+    print("<<< РЕЗУЛЬТАТЫ ОПТИМИЗАЦИИ >>>")
+    print("=" * 50)
+
+    # Проверяем, были ли завершенные пробы
+    completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+
+    if not completed_trials:
+        print("Не найдено ни одной успешно завершенной пробы.")
+    else:
+        print(f"Всего завершено проб: {len(completed_trials)}")
+
+        # --- Лучшая проба ---
+        best_trial = study.best_trial
+        print("\n--- Лучшая Найденная Комбинация ---")
+        print(f"Номер пробы: {best_trial.number}")
+        # Выводим оценку в процентах для наглядности
+        print(f"Лучшая оценка (средняя схожесть DeepFace): {best_trial.value * 100.0:.4f}%")
+        print("Лучшие параметры:")
+        for key, value in best_trial.params.items():
+            print(f"  - {key}: {value:.4f}")
+        best_image_name = f"trial_{best_trial.number:03d}_*.jpeg" # Примерный шаблон имени
+        print(f"Соответствующее изображение (ищите файл по шаблону): {os.path.join(OUTPUT_DIR, best_image_name)}")
+
+        # --- Таблица Всех Проб ---
+        try:
+            df = study.trials_dataframe()
+            # Переименуем столбцы для ясности и отсортируем по оценке
+            df_display = df[['number', 'value', 'state'] + [f'params_{name}' for name in HYPERPARAMETER_RANGES.keys()]].copy()
+            df_display.rename(columns={'value': 'similarity_score', 'number':'trial_num'}, inplace=True)
+             # Конвертируем оценку в проценты для отображения
+            if 'similarity_score' in df_display.columns:
+                 df_display['similarity_score'] = df_display['similarity_score'].apply(lambda x: f"{x*100.0:.4f}%" if pd.notna(x) else "N/A")
+
+            # Убираем 'params_' из имен столбцов
+            df_display.columns = [col.replace('params_', '') for col in df_display.columns]
+
+            print("\n--- Подробная Таблица Всех Проб ---")
+            # Сортируем по номеру пробы для хронологического порядка
+            df_display.sort_values(by='trial_num', inplace=True)
+            # Устанавливаем опции Pandas для красивого вывода
+            pd.set_option('display.max_rows', None)
+            pd.set_option('display.max_columns', None)
+            pd.set_option('display.width', 1000)
+            print(df_display)
+        except Exception as e:
+            print(f"\nНе удалось сформировать или вывести DataFrame с результатами: {e}")
+
+
+    print("\n" + "="*50)
+    print(f"Оптимизация завершена. Результаты и изображения сохранены в папке: {OUTPUT_DIR}")
+    print("="*50)
