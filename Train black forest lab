@@ -1,0 +1,132 @@
+# ИТОГОВЫЙ КОД ПО ОБУЧЕНИИ МОДЕЛИ ЧЕРЕЗ BLACK FOREST LAB, как со своими подписями работает так и с автоматическими
+
+import requests
+import base64
+import os
+import zipfile
+
+# Ваш API-ключ
+api_key = "1574" # <--- Осторожно с публикацией ключей! Рекомендую его отозвать и сгенерировать новый.
+
+# --- ИЗМЕНЕННАЯ ФУНКЦИЯ ---
+def create_zip_archive(folder_path, zip_path, include_txt_files):
+    """
+    Создает ZIP-архив из папки с фотографиями.
+    Если include_txt_files=True, также добавляет .txt файлы с тем же именем, что и фото.
+    """
+    print(f"Создание архива: {zip_path}, Включить .txt файлы: {include_txt_files}") # Добавим лог для ясности
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk(folder_path):
+            for file in files:
+                file_lower = file.lower()
+                # Проверяем, является ли файл изображением
+                if file_lower.endswith(('.png', '.jpg', '.jpeg')):
+                    file_path = os.path.join(root, file)
+                    relative_path = os.path.relpath(file_path, folder_path)
+                    print(f"  Добавляем изображение: {relative_path}")
+                    zipf.write(file_path, relative_path)
+
+                    # Если нужно включить .txt файлы, ищем соответствующий
+                    if include_txt_files:
+                        # Формируем имя .txt файла (пример: image.jpg -> image.txt)
+                        base_name, _ = os.path.splitext(file)
+                        txt_filename = base_name + ".txt"
+                        txt_file_path = os.path.join(root, txt_filename)
+
+                        # Проверяем, существует ли .txt файл
+                        if os.path.exists(txt_file_path):
+                            txt_relative_path = os.path.relpath(txt_file_path, folder_path)
+                            print(f"    Найден и добавляем текстовый файл: {txt_relative_path}")
+                            zipf.write(txt_file_path, txt_relative_path)
+                        else:
+                            print(f"    Предупреждение: .txt файл не найден для {file_path}")
+
+
+    print(f"Архив {zip_path} создан.")
+    return zip_path
+
+def encode_zip_to_base64(zip_path):
+    """Кодирует ZIP-файл в base64"""
+    with open(zip_path, 'rb') as f:
+        zip_data = f.read()
+    return base64.b64encode(zip_data).decode('utf-8')
+
+# --- ИЗМЕНЕННАЯ ФУНКЦИЯ ---
+def submit_finetune(api_key, photos_folder):
+    """Отправляет запрос на файн-тюнинг модели"""
+
+    zip_path = "training_photos.zip"
+
+    # Параметры запроса
+    payload = {
+        "file_data": None, # Заполним позже
+        "finetune_comment": "My custom photoshoot model3", # Можно обновить комментарий
+        "trigger_word": "ANKUDINOVIVAN13",
+        "mode": "character",
+        "iterations": 1000,
+        # --- УСТАНОВИТЕ False, чтобы включить добавление .txt файлов ---
+        "captioning": False,
+        "priority": "quality",
+        "finetune_type": "lora",
+        "lora_rank": 16
+    }
+
+    # Определяем, нужно ли включать .txt файлы на основе значения 'captioning'
+    # Если captioning=False, то include_txt=True. Если captioning=True, то include_txt=False.
+    should_include_txt = not payload.get("captioning", True) # Используем .get для безопасности
+
+    # Создаем ZIP-архив, передавая флаг для включения .txt файлов
+    create_zip_archive(photos_folder, zip_path, include_txt_files=should_include_txt)
+
+    # Кодируем ZIP в base64
+    file_data = encode_zip_to_base64(zip_path)
+
+    # Обновляем payload с закодированными данными
+    payload["file_data"] = file_data
+
+    # URL для файн-тюнинга
+    url = "https://api.us1.bfl.ai/v1/finetune"
+
+    # Заголовки
+    headers = {
+        "x-key": api_key,
+        "accept": "application/json",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        # Отправляем POST-запрос
+        print("Отправка запроса на файн-тюнинг...")
+        response = requests.post(url, json=payload, headers=headers)
+
+        if response.status_code == 200:
+            print("Файн-тюнинг успешно отправлен! Статус: 200 OK")
+            print("Ответ сервера:", response.json())
+            return response.json()
+        else:
+            print(f"Ошибка при отправке файн-тюнинга. Код статуса: {response.status_code}")
+            print("Ответ сервера:", response.text)
+            return None
+
+    except requests.exceptions.RequestException as e:
+        print(f"Произошла ошибка при подключении: {str(e)}")
+        return None
+    finally:
+        # Опционально: удалить временный zip-файл после отправки
+        if os.path.exists(zip_path):
+             print(f"Удаление временного архива: {zip_path}")
+             os.remove(zip_path)
+
+# Путь к папке с вашими фотографиями и .txt файлами
+photos_folder = "/Users/ivan/Downloads/lastPhoto"  # Убедитесь, что здесь лежат и фото, и .txt файлы
+
+# Запускаем процесс
+print("Запуск процесса файн-тюнинга...")
+finetune_data = submit_finetune(api_key, photos_folder)
+if finetune_data:
+    finetune_id = finetune_data.get("finetune_id", "ID не найден в ответе")
+    print(f"ID вашей finetune модели: {finetune_id}")
+else:
+    print("Не удалось создать finetune модель")
+
+print("Процесс завершен.")
