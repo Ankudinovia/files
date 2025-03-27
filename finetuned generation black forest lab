@@ -1,0 +1,103 @@
+# этот код - построение фотографии на Black Forest Lab с помощью ранее обученной модели LORA
+
+import requests
+import time
+import base64
+import os
+
+# Ваш API-ключ и finetune_id
+api_key = "1574"
+finetune_id = "636d"
+
+def encode_image_to_base64(image_path):
+    """Кодирует локальное изображение в base64"""
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Файл {image_path} не найден")
+    with open(image_path, "rb") as image_file:
+        image_data = image_file.read()
+    return base64.b64encode(image_data).decode("utf-8")
+
+def submit_finetuned_generation(api_key, finetune_id, image_path):
+    """Отправляет запрос на генерацию изображения с finetune моделью и исходным изображением"""
+    url = "https://api.us1.bfl.ai/v1/flux-pro-1.1-ultra-finetuned"
+    
+    # Кодируем изображение в base64
+    image_prompt = encode_image_to_base64(image_path)
+    
+    # Параметры запроса с ключевым словом и изображением
+    payload = {
+        "finetune_id": finetune_id,
+        "finetune_strength": 1.15,  # Сила влияния finetune (0.0–2.0) 1.1 1.2 1.3
+       
+        "prompt": """
+Photograph of ANKUDINOVIVAN13  with short dark brown hair featuring lighter highlighted tips, styled upwards in a textured, slightly messy fashion. They have a neatly trimmed dark beard and mustache. They are wearing a white button-down shirt, left unbuttoned low on the chest with the collar slightly popped. A black bow tie with a subtle dark paisley pattern is untied and draped around the neck; one end hangs down the front left side, while the person's left hand grasps the other strap near their left shoulder. A silver-toned ring with a dark central detail is visible on their left ring finger. A very thin, dark necklace or chain is faintly visible under the open shirt collar. Their gaze is directed straight at the camera with a serious, intense expression. The background is a plain, uniform light grey or off-white wall, suggesting a studio setting. The lighting is bright and even, likely from the front, creating soft shadows under the chin and defining the clothing folds. The shot is a mid-length portrait capturing the upper body from the waist up, taken at approximately eye level.
+""",
+        "negative_prompt": "ugly, deformed, disfigured, malformed, misshapen, grotesque, monstrous, blurry, out of focus, unfocused, hazy, fuzzy, low quality, worst quality, bad quality, poor quality, jpeg artifacts, compression artifacts, pixelated, lowres, low resolution, text, writing, letters, words, captions, labels, titles, watermark, signature, logo, brand name, copyright notice, username, artist name, noisy, grainy, noise artifacts, film grain (if unwanted), speckles, static, worst quality, low quality rendering, bad rendering, amateurish, unprofessional, multiple people, two people, three people, group, crowd, duplicate figures, cloned faces, merged figures, bad anatomy, anatomical errors, unrealistic anatomy, poorly drawn anatomy, disproportionate body parts, incorrect proportions, mutated, mutation, extra limbs, missing limbs, fused limbs, extra fingers, missing fingers, fused fingers, deformed hands, poorly drawn hands, bad hands, mangled fingers, extra digits, fewer digits, six fingers, four fingers, webbed fingers, distorted face, asymmetric face, poorly drawn face, weird eyes, crossed eyes, lazy eye, mismatched eyes, poorly drawn eyes, bad teeth, crooked teeth, extra teeth, missing teeth, elongated neck, short torso, long legs, short legs, floating limbs, disconnected limbs, double heads, multiple heads, tiling artifacts, repeating patterns, glitches, errors, artifacts, bad composition, poorly framed, cropped subject, subject out of frame, cluttered background, distracting background elements, borders, frames, UI elements, interface elements, cartoon, drawing, sketch, illustration, painting, anime, manga, 3D render, video game graphics (unless desired), plastic skin, unrealistic skin texture, doll-like appearance, uncanny valley, morbid, mutilated, severed limbs, too much airbrushing, oversmoothed skin, simple background, plain background (if detail is wanted)",
+        "image_prompt": image_prompt,  # Base64-кодированное изображение
+        "image_prompt_strength": 0.05, # 0.2 0.5 1
+        #"aspect_ratio": "16:9", 
+        "steps": 28,
+        "guidance": 2.5,
+        "prompt_upsampling": False,
+        "seed": None,
+        "safety_tolerance": 2,
+        "output_format": "jpeg"
+    }
+
+    headers = {
+        "x-key": api_key,
+        "accept": "application/json",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        if response.status_code == 200:
+            print("Запрос на генерацию отправлен! Статус: 200 OK")
+            print("Ответ сервера:", response.json())
+            return response.json()
+        else:
+            print(f"Ошибка при отправке. Код статуса: {response.status_code}")
+            print("Ответ сервера:", response.text)
+            return None
+    except requests.exceptions.RequestException as e:
+        print(f"Ошибка подключения: {str(e)}")
+        return None
+
+def check_generation_result(task_id, api_key):
+    """Проверяет результат генерации"""
+    url = "https://api.us1.bfl.ai/v1/get_result"
+    headers = {"x-key": api_key, "accept": "application/json"}
+    params = {"id": task_id}
+    while True:
+        try:
+            response = requests.get(url, headers=headers, params=params)
+            if response.status_code == 200:
+                result = response.json()
+                print("Статус задачи:", result)
+                if result.get("status") == "Ready":
+                    print("Генерация завершена! Результат:", result.get("result"))
+                    return result
+                elif result.get("status") in ["Error", "Content Moderated", "Request Moderated"]:
+                    print("Ошибка или модерация:", result)
+                    return None
+            else:
+                print(f"Ошибка проверки. Код: {response.status_code}")
+                print("Ответ:", response.text)
+                return None
+            time.sleep(5)
+        except requests.exceptions.RequestException as e:
+            print(f"Ошибка проверки: {str(e)}")
+            return None
+
+# Путь к вашему локальному изображению
+image_path = "/Users/ivan/Downloads/zqgr.jpg"  # Замените на реальный путь
+
+# Запускаем генерацию
+task_data = submit_finetuned_generation(api_key, finetune_id, image_path)
+if task_data and "id" in task_data:
+    task_id = task_data["id"]
+    print(f"ID задачи: {task_id}")
+    result = check_generation_result(task_id, api_key)
+else:
+    print("Не удалось получить ID задачи")
